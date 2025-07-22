@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "backend-tensor"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+packages = [{ include = "backend" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"                 # ← se mueve aquí
+fastapi = "^0.116.0"
+uvicorn = {extras = ["standard"], version = "^0.35.0"}
+python-jose = {extras = ["cryptography"], version = "^3.5.0"}
+httpx = "^0.28.1"
+cachetools = "^6.1.0"
+python-dotenv = "^1.1.1"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.4.7"
+black = "^24.4.2"
+
+[tool.poetry.scripts]
+dev = "backend.main:dev"
+
+[build-system]
+requires = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "B"]
