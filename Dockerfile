@@ -1,22 +1,28 @@
-# Dockerfile (en la raíz de backend_tensor)
+# backend_tensor/Dockerfile
 FROM python:3.13-slim
 
+# -------- SO deps mínimos (compiladores + libpq para psycopg) ----------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# -------- Workspace ---------------------------------------------------
 WORKDIR /app
 
-# 1) Copiamos sólo pyproject.toml y poetry.lock para cachear deps
+# 1) Copiamos primero los manifests para cachear dependencias
 COPY pyproject.toml poetry.lock /app/
 
-# 2) Instalamos Poetry y las deps de producción (sin el paquete .)
-RUN pip install poetry \
- && poetry config virtualenvs.create false \
- && poetry install --no-root --only main
+# 2) Instalamos Poetry y deps de producción
+RUN pip install --no-cache-dir poetry && \
+    poetry config virtualenvs.create false && \
+    poetry install --no-root --only main
 
-# 3) Ahora sí copiamos TODO el código
+# 3) Copiamos el resto del código
 COPY . /app
 
-# 4) Exponemos el puerto de la API
+# 4) Puerto expuesto (FastAPI en 4000)
 EXPOSE 4000
 
-# 5) Definimos command por defecto (la API). El worker se lanzará
-#    desde docker-compose con otro command distinto.
-CMD ["poetry", "run", "dev"]
+# 5) Comando por defecto (API).  
+#    El servicio `worker` del docker-compose lo sobreescribe.
+CMD ["poetry", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "4000", "--reload"]
