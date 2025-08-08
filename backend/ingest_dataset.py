@@ -6,20 +6,26 @@ from sqlmodel import Session, select
 
 from backend.db import engine
 from backend.supabase_client import get_supabase
-from backend.models import Dataset, Column          # Column = tabla "columns"
+from backend.models import Dataset, Column
+
+# ────────────── colas Redis / RQ ───────────────────────────────────
+from redis import Redis
+from rq import Queue
+
+redis_conn   = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+q_embeddings = Queue("embeddings", connection=redis_conn)
+# -------------------------------------------------------------------
 
 BUCKET = os.getenv("STORAGE_BUCKET", "uploadeddocs")
 
-# ──────────────────────────────────────────────────────────────────────────
 def to_jsonable(val):
-    """Convierte valores a tipos serializables por JSON."""
     if isinstance(val, (datetime.date, datetime.datetime)):
         return val.isoformat()
     if isinstance(val, (bytes, bytearray)):
         return val.decode("utf-8", errors="ignore")
     return val
 
-# ──────────────────────────────────────────────────────────────────────────
+
 def process_dataset(dataset_id: UUID):
     supa = get_supabase()
 
@@ -46,7 +52,7 @@ def process_dataset(dataset_id: UUID):
         # 2️⃣ Lee con Polars
         fname = ds.filename.lower().strip()
         if fname.endswith((".xlsx", ".xls")):
-            df = pl.read_excel(buffer)          # requiere fastexcel
+            df = pl.read_excel(buffer)
         elif fname.endswith(".csv"):
             df = pl.read_csv(buffer)
         else:
@@ -65,7 +71,7 @@ def process_dataset(dataset_id: UUID):
             supa.storage.from_(BUCKET).upload(
                 pq_path,
                 data,
-                file_options={"upsert": "true"}   # str, no bool
+                file_options={"upsert": "true"}
             )
 
         ds.parquet_url = f"{BUCKET}/{pq_path}"
@@ -77,21 +83,25 @@ def process_dataset(dataset_id: UUID):
 
             session.add(
                 Column(
-                    dataset_id     = dataset_id,
-                    original_name  = col,
-                    detected_type  = dtype,
-                    sample_values  = sample_vals,
+                    dataset_id    = dataset_id,
+                    original_name = col,
+                    detected_type = dtype,
+                    sample_values = sample_vals,
                 )
             )
 
         # 5️⃣ Actualiza dataset
         ds.rows_count = df.height
-        ds.status     = "ready"
+        ds.status     = "ready_for_embeddings"
         session.commit()
+
+        # 6️⃣ Encola embeddings (lazy-import para que la API no requiera qdrant/openai)
+        from backend.tasks.embeddings import generate_embeddings   # ← import aquí
+        q_embeddings.enqueue(generate_embeddings, str(dataset_id))
 
         print(f"Dataset {dataset_id} → ready ({df.height} rows, {len(df.columns)} cols)")
 
-# ──────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import sys, uuid
     if len(sys.argv) != 2:

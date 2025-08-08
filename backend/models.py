@@ -6,6 +6,7 @@ from sqlalchemy import Column as SAColumn, Float
 from sqlalchemy.dialects.postgresql import JSONB   # añade arriba
 from sqlalchemy import Float, Column              # añade Float
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import Column, String
 from uuid import UUID
 from uuid import uuid4
 

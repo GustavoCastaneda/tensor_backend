@@ -1,6 +1,7 @@
 import os
 import urllib.parse
 from sqlmodel import SQLModel, create_engine, Session
+from sqlalchemy.orm import sessionmaker   # ← NUEVO
 from dotenv import load_dotenv
 
 load_dotenv()  # carga las variables de .env
@@ -24,6 +25,16 @@ engine = create_engine(
     max_overflow=20,
     connect_args={"prepare_threshold": 0},
 )
+
+# ────────────────────────────────
+# Session factory reutilizable  ← NUEVO
+SessionLocal = sessionmaker(
+    bind=engine,
+    class_=Session,
+    autoflush=False,
+    autocommit=False,
+)
+# ────────────────────────────────
 
 def get_session() -> Session:
     """Dependencia de FastAPI para inyectar sesiones síncronas."""

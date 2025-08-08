@@ -41,7 +41,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: tensor_worker
-    command: rq worker ingest
+    command: rq worker ingest embeddings
     volumes:
       - ./:/app
     env_file:
