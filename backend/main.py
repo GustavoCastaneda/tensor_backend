@@ -6,6 +6,7 @@ from backend.routes import chat
 from backend.routes import users
 from backend.routes import datasets
 from backend.db import init_db            # crea tablas en dev, opcional
+from backend.routes import documents
 
 app = FastAPI(title="Tensor Workspace API")
 
@@ -26,6 +27,7 @@ app.add_middleware(
 # ──────────────── Rutas ────────────────
 app.include_router(users.router)
 app.include_router(datasets.router)
+app.include_router(documents.router)
 app.include_router(chat.router)
 
 # ──────────────── BD dev (opcional) ────────────────

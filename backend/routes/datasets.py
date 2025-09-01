@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from uuid import uuid4, UUID
 import datetime, os, io
 import polars as pl
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from backend.task_queue import ingest_queue          # cola RQ
@@ -54,6 +55,93 @@ def upload_url(
     )
 
     return {"dataset_id": str(dataset_id), "upload_url": upload_url, "object_key": object_key}
+
+# ------------------------------------------------------------------ #
+# 1.b) NUEVO — Registrar dataset (post-subida o flujo alterno)
+#      - Si envías dataset_id: actualiza y encola solo si no estaba procesándose.
+#      - Si NO envías dataset_id: crea uno nuevo y encola.
+# ------------------------------------------------------------------ #
+class DatasetRegisterRequest(BaseModel):
+    filename: str
+    object_key: str | None = None         # p.ej. "uploads/2025/08/mi_archivo.xlsx" o "<uuid>.xlsx"
+    storage_url: str | None = None        # alternativo a object_key: "bucket/key"
+    dataset_id: UUID | None = None
+
+@router.post("/register")
+def datasets_register(
+    req: DatasetRegisterRequest,
+    user    = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    bucket = os.getenv("STORAGE_BUCKET", "uploads")
+
+    # Resolver storage_url final
+    if req.storage_url:
+        storage_url = req.storage_url
+    elif req.object_key:
+        # Si viene "bucket/key", respetar; si viene solo "key", prefijar bucket
+        storage_url = req.object_key if "/" in req.object_key and req.object_key.split("/", 1)[0] != "" \
+            else f"{bucket}/{req.object_key}"
+    else:
+        raise HTTPException(400, "Debes enviar 'object_key' o 'storage_url'.")
+
+    # Caso A: actualizar dataset existente
+    if req.dataset_id:
+        ds = session.exec(select(Dataset).where(Dataset.id == req.dataset_id)).first()
+        if not ds or ds.user_id != user["sub"]:
+            raise HTTPException(404, f"Dataset {req.dataset_id} no encontrado")
+
+        # Actualizar filename/storage_url si cambian
+        changed = False
+        if req.filename and req.filename != ds.filename:
+            ds.filename = req.filename
+            changed = True
+        if storage_url and storage_url != ds.storage_url:
+            ds.storage_url = storage_url
+            changed = True
+
+        # Encolar solo si aún no estaba en procesamiento o listo
+        should_enqueue = False
+        if ds.status not in ("processing", "ready_for_embeddings", "ready_for_chat"):
+            ds.status = "processing"
+            should_enqueue = True
+            changed = True
+
+        if changed:
+            session.add(ds)
+            session.commit()
+
+        if should_enqueue:
+            ingest_queue.enqueue(
+                process_dataset,
+                str(ds.id),
+                job_timeout="1h",
+                result_ttl=500,
+            )
+
+        return {"dataset_id": str(ds.id), "status": ds.status, "storage_url": ds.storage_url}
+
+    # Caso B: crear dataset nuevo
+    new_id = uuid4()
+    ds = Dataset(
+        id          = new_id,
+        user_id     = user["sub"],
+        filename    = req.filename,
+        storage_url = storage_url,
+        status      = "processing",
+        created_at  = datetime.datetime.utcnow(),
+    )
+    session.add(ds)
+    session.commit()
+
+    ingest_queue.enqueue(
+        process_dataset,
+        str(new_id),
+        job_timeout="1h",
+        result_ttl=500,
+    )
+
+    return {"dataset_id": str(new_id), "status": "processing", "storage_url": storage_url}
 
 # ------------------------------------------------------------------ #
 # 2) Estado general del dataset

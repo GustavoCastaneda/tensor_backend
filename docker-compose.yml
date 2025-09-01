@@ -52,3 +52,23 @@ services:
     depends_on:
       - redis
       - qdrant
+
+  # NUEVO: worker dedicado para parseo de documentos con Docling
+  worker_docs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tensor_worker_docs
+    # Cola exclusiva para parseo de documentos; puedes añadir "embeddings" si quieres encadenar
+    command: rq worker doc_parse embeddings
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      # Activa el adapter de Docling y cómo invocar el binario dentro del contenedor
+      DOC_PARSER: "docling"
+      DOCLING_BIN: "docling"
+    depends_on:
+      - redis

@@ -17,13 +17,18 @@ clean_db_url = urllib.parse.urlunsplit(
     (url_parts.scheme, url_parts.netloc, url_parts.path, "", "")
 )
 
-# Crear motor con umbral de statements preparadas desactivado
+# Crear motor con configuración optimizada para workers
 engine = create_engine(
     clean_db_url,
     echo=False,          # True para ver SQL en consola
-    pool_size=10,
-    max_overflow=20,
-    connect_args={"prepare_threshold": 0},
+    pool_size=5,         # Reducido para evitar conflictos
+    max_overflow=10,     # Reducido para mejor control
+    pool_pre_ping=True,  # Verificar conexiones antes de usar
+    pool_recycle=3600,   # Reciclar conexiones cada hora
+    connect_args={
+        "prepare_threshold": None,  # Deshabilitar prepared statements
+        "application_name": "tensor_backend",  # Identificar la aplicación
+    },
 )
 
 # ────────────────────────────────
