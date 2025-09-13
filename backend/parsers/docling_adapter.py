@@ -43,15 +43,20 @@ def _fallback_docx(buffer: bytes) -> List[str]:
         d = docx.Document(tmp.name)
     return ["\n".join([p.text for p in d.paragraphs])]
 
-def extract_pages(buffer: bytes, ext: str) -> List[str]:
+def extract_pages_and_formulas(buffer: bytes, ext: str) -> tuple[List[str], List[dict]]:
     """
-    Usa Docling (API Python) y habilita OCR para PDFs si DOCLING_OCR=on/true/1.
-    Si Docling falla o devuelve vacío, cae a fallbacks nativos (pypdf/docx).
+    Extrae páginas y fórmulas de un documento usando Docling.
+
+    Returns:
+        tuple: (pages, formulas)
+        - pages: Lista de strings con el contenido de cada página
+        - formulas: Lista de diccionarios con información de fórmulas
     """
     ext = (ext or "").lower().lstrip(".")
     use_docling = os.getenv("DOC_PARSER", "docling").lower() == "docling"
-    
+
     print(f"[docling] Processing {ext} file, use_docling={use_docling}")
+    formulas = []
 
     if use_docling:
         try:
@@ -68,37 +73,73 @@ def extract_pages(buffer: bytes, ext: str) -> List[str]:
                     do_ocr = os.getenv("DOCLING_OCR", "on").lower() in ("on", "true", "1")
                     langs = os.getenv("DOCLING_OCR_LANGS", "auto").split(",")
                     force_full = os.getenv("DOCLING_FORCE_FULL_OCR", "true").lower() in ("on", "true", "1")
-                    print(f"[docling] PDF config: OCR={do_ocr}, langs={langs}, force_full={force_full}")
-                    
+                    do_formula_enrichment = os.getenv("DOCLING_FORMULA_ENRICHMENT", "false").lower() in ("on", "true", "1")
+
+                    print(f"[docling] PDF config: OCR={do_ocr}, langs={langs}, force_full={force_full}, formula_enrichment={do_formula_enrichment}")
+
                     pipe = PdfPipelineOptions(
                         do_ocr=do_ocr,
                         force_full_page_ocr=force_full,
+                        do_formula_enrichment=do_formula_enrichment,
                         ocr_options=TesseractCliOcrOptions(
                             lang=langs,
                             force_full_page_ocr=force_full,
                         ),
                         artifacts_path=os.getenv("DOCLING_ARTIFACTS_PATH"),
+                        # Optimizaciones para reducir uso de memoria
+                        max_pages=20,  # Limitar páginas para evitar sobrecarga
+                        max_chars_per_page=25000,  # Reducir caracteres por página
                     )
                     converter = DocumentConverter(
                         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipe)}
                     )
                 else:
-                    # DOCX / otros: sin config especial
-                    converter = DocumentConverter()
+                    # DOCX / otros: configuración básica con formula enrichment si está habilitado
+                    do_formula_enrichment = os.getenv("DOCLING_FORMULA_ENRICHMENT", "false").lower() in ("on", "true", "1")
+                    print(f"[docling] {ext.upper()} config: formula_enrichment={do_formula_enrichment}")
+
+                    if do_formula_enrichment:
+                        pipe = PdfPipelineOptions(
+                            do_formula_enrichment=do_formula_enrichment,
+                            # Optimizaciones para reducir uso de memoria
+                            max_pages=20,
+                            max_chars_per_page=25000,
+                        )
+                        converter = DocumentConverter(format_options={
+                            InputFormat.DOCX: PdfFormatOption(pipeline_options=pipe)
+                        })
+                    else:
+                        converter = DocumentConverter()
 
                 print("[docling] Converting document...")
                 conv = converter.convert(tmp.name)
                 print(f"[docling] Conversion result: {conv}")
-                
+
+                # Extraer fórmulas del documento
+                formula_count = 0
+                for item in conv.document.texts:
+                    if hasattr(item, 'label') and str(item.label).upper() == 'FORMULA':
+                        formula_info = {
+                            'page_number': getattr(item, 'page_no', 0),
+                            'latex_code': getattr(item, 'text', ''),
+                            'original_text': getattr(item, 'original_text', None),
+                            'confidence_score': getattr(item, 'confidence', None),
+                        }
+                        formulas.append(formula_info)
+                        formula_count += 1
+
                 md_text = conv.document.export_to_markdown() or ""
-                print(f"[docling] Markdown length: {len(md_text)}")
-                
+                print(f"[docling] Markdown length: {len(md_text)}, formulas found: {formula_count}")
+
                 pages = _split_markdown(md_text)
                 print(f"[docling] Split into {len(pages)} pages")
-                
+
                 if pages:
-                    print("[docling] Successfully processed with Docling")
-                    return pages
+                    if formula_count > 0:
+                        print(f"[docling] Successfully processed with Docling (including {formula_count} formulas)")
+                    else:
+                        print("[docling] Successfully processed with Docling")
+                    return pages, formulas
                 else:
                     print("[docling] Docling returned empty pages, falling back")
         except Exception as e:
@@ -110,7 +151,20 @@ def extract_pages(buffer: bytes, ext: str) -> List[str]:
 
     print(f"[docling] Using fallback for {ext}")
     if ext == "pdf":
-        return _fallback_pdf(buffer)
+        pages = _fallback_pdf(buffer)
     if ext == "docx":
-        return _fallback_docx(buffer)
-    return []
+        pages = _fallback_docx(buffer)
+    else:
+        pages = []
+    return pages, []
+
+
+def extract_pages(buffer: bytes, ext: str) -> List[str]:
+    """
+    Función de compatibilidad que mantiene la interfaz original.
+    Usa Docling (API Python) y habilita OCR para PDFs si DOCLING_OCR=on/true/1.
+    Habilita formula enrichment si DOCLING_FORMULA_ENRICHMENT=on/true/1.
+    Si Docling falla o devuelve vacío, cae a fallbacks nativos (pypdf/docx).
+    """
+    pages, _ = extract_pages_and_formulas(buffer, ext)
+    return pages

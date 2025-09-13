@@ -1,0 +1,25 @@
+{
+  "cluster": "tensor-cluster",
+  "serviceName": "tensor-docling-service",
+  "taskDefinition": "tensor-docling-worker",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-0529909a78cf8f83b",
+        "subnet-0825a16b5799f1aa6"
+      ],
+      "securityGroups": [
+        "sg-081caaae83250795a"
+      ],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "healthCheckGracePeriodSeconds": 60,
+  "deploymentConfiguration": {
+    "maximumPercent": 200,
+    "minimumHealthyPercent": 50
+  }
+}

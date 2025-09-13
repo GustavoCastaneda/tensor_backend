@@ -1,0 +1,48 @@
+# Dockerfile optimizado para producción en ECS Fargate
+FROM python:3.13-slim
+
+# -------- SO deps + Tesseract (OCR) ----------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential gcc libpq-dev \
+      tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa tesseract-ocr-osd \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# -------- Usuario no-root para seguridad ----------
+RUN useradd --create-home --shell /bin/bash app
+USER app
+
+# Asegura que los binarios instalados con --user (p.ej. rq) estén en PATH
+ENV PATH="/home/app/.local/bin:${PATH}"
+
+# Configurar PYTHONPATH para que RQ pueda encontrar los módulos
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+# -------- Workspace ---------------------------------------------------
+WORKDIR /app
+RUN chown -R app:app /app
+
+# 1) Instalar dependencias principales directamente con pip
+RUN pip install --no-cache-dir --user \
+    fastapi uvicorn redis rq \
+    sqlalchemy psycopg[binary] \
+    sqlmodel pydantic python-multipart \
+    qdrant-client supabase \
+    python-dotenv polars python-jose[cryptography] \
+    httpx cachetools
+
+# 2.1) Docling + dependencias para procesamiento de documentos
+RUN pip install --no-cache-dir --user \
+    docling pypdf python-docx \
+    pillow pytesseract opencv-python-headless \
+    openai
+
+# 3) Código
+COPY --chown=app:app . /app
+
+# 4) Puerto expuesto (FastAPI en 4000)
+EXPOSE 4000
+
+# 5) Comando del Worker RQ
+CMD ["rq", "worker", "doc_parse", "ingest", "embeddings"]

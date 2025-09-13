@@ -13,7 +13,14 @@ app = FastAPI(title="Tensor Workspace API")
 # ──────────────── CORS ────────────────
 origins = [
     "http://localhost:3000",                # Next.js dev
+    "http://localhost:3001",                # React dev
+    "http://localhost:3002",                # Vite dev
+    "http://localhost:5173",                # Vite dev
+    "http://localhost:8080",                # Vue dev
+    "http://localhost:5000",                # Flask dev
     "https://app.tu-dominio.com",           # dominio producción (ajústalo)
+    "http://127.0.0.1:3000",               # localhost alternativo
+    "http://127.0.0.1:3001",               # localhost alternativo
 ]
 
 app.add_middleware(

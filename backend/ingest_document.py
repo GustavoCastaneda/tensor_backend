@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 
 from backend.db import engine
 from backend.supabase_client import get_supabase
-from backend.models import Document, DocChunk
+from backend.models import Document, DocChunk, DocumentFormula
 
 # Colas
 from redis import Redis
@@ -43,10 +43,10 @@ def _chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUN
 
 def process_document(document_id: UUID):
     """
-    Descarga PDF/DOCX desde Storage, lo parsea con Docling,
+    Descarga PDF/DOCX desde Storage, lo parsea con Docling (incluyendo fórmulas matemáticas),
     trocea a chunks y los persiste. Luego encola embeddings.
     """
-    from backend.parsers.docling_adapter import extract_pages  # import diferido
+    from backend.parsers.docling_adapter import extract_pages_and_formulas  # import diferido
 
     supa = get_supabase()
 
@@ -74,7 +74,7 @@ def process_document(document_id: UUID):
         fname = (doc.filename or "").lower()
         ext = "pdf" if fname.endswith(".pdf") else "docx" if fname.endswith(".docx") else ""
         try:
-            pages: List[str] = extract_pages(raw, ext=ext)
+            pages, formulas = extract_pages_and_formulas(raw, ext=ext)
         except Exception as e:
             doc.status = "error"
             session.commit()
@@ -145,6 +145,28 @@ def process_document(document_id: UUID):
         session.add_all(to_add)
         session.commit()
 
+        # 5.1) Guardar fórmulas matemáticas extraídas
+        if formulas:
+            formulas_to_add = []
+            for idx, formula_info in enumerate(formulas):
+                formula = DocumentFormula(
+                    document_id=document_id,
+                    page_number=formula_info.get('page_number', 0),
+                    formula_index=idx,
+                    latex_code=formula_info.get('latex_code', ''),
+                    original_text=formula_info.get('original_text'),
+                    confidence_score=formula_info.get('confidence_score'),
+                )
+                formulas_to_add.append(formula)
+
+            if formulas_to_add:
+                session.add_all(formulas_to_add)
+                session.commit()
+                print(f"[doc] saved {len(formulas_to_add)} formulas to database")
+
+        # 5.2) Actualizar contador de fórmulas en el documento
+        doc.formulas_count = len(formulas) if formulas else 0
+
         # 6) Estado listo para embeddings + encolar
         doc.status = "ready_for_embeddings"
         session.commit()
@@ -158,4 +180,4 @@ def process_document(document_id: UUID):
 
         # Document processing completed successfully
 
-        print(f"[doc] {document_id} → pages={len(pages)} chunks={chunk_count}")
+        print(f"[doc] {document_id} → pages={len(pages)} chunks={chunk_count} formulas={len(formulas) if formulas else 0}")

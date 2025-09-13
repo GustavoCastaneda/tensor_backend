@@ -94,6 +94,7 @@ class Document(SQLModel, table=True):
     # métricas del parseo
     pages_count: Optional[int] = 0
     text_chars: Optional[int] = 0
+    formulas_count: Optional[int] = 0  # cantidad de fórmulas matemáticas encontradas
 
 
 class DocChunk(SQLModel, table=True):
@@ -107,3 +108,18 @@ class DocChunk(SQLModel, table=True):
     page_number: int = 0           # página original (1-based)
     chunk_index: int = 0           # índice dentro de la página (0-based)
     content: str                   # texto/chunk (markdown o texto plano)
+
+
+class DocumentFormula(SQLModel, table=True):
+    __tablename__ = "document_formulas"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
+
+    # FK a documents.id
+    document_id: UUID = Field(foreign_key="documents.id", index=True)
+
+    page_number: int = 0           # página donde se encontró la fórmula (1-based)
+    formula_index: int = 0         # índice de la fórmula en la página (0-based)
+    latex_code: str               # código LaTeX de la fórmula
+    original_text: Optional[str] = None  # texto original de la fórmula
+    confidence_score: Optional[float] = None  # confianza del reconocimiento (0-1)

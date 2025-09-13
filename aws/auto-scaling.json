@@ -1,0 +1,16 @@
+{
+  "clusterName": "tensor-cluster",
+  "serviceName": "tensor-docling-service",
+  "minCapacity": 1,
+  "maxCapacity": 5,
+  "resourceId": "service/tensor-cluster/tensor-docling-service",
+  "roleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSTaskAutoScalingRole",
+  "targetTrackingScalingPolicyConfiguration": {
+    "targetValue": 70.0,
+    "predefinedMetricSpecification": {
+      "predefinedMetricType": "ECSServiceAverageCPUUtilization"
+    },
+    "scaleOutCooldown": 300,
+    "scaleInCooldown": 300
+  }
+}

@@ -10,7 +10,7 @@ from backend.db import get_session
 from backend.supabase_client import get_supabase
 
 from backend.ingest_document import process_document
-from backend.models import Document, DocChunk
+from backend.models import Document, DocChunk, DocumentFormula
 
 # Cola dedicada para parseo de documentos
 from redis import Redis
@@ -55,7 +55,21 @@ def upload_url(
     session.add(doc)
     session.commit()
 
-    q_doc.enqueue(process_document, str(doc_id), job_timeout="10m", result_ttl=500)
+    # Log detallado del encolamiento
+    print(f"[DEBUG] Encolando trabajo para documento {doc_id}")
+    try:
+        # Usar ruta completa de importación
+        job = q_doc.enqueue(
+            "backend.ingest_document.process_document",
+            str(doc_id),
+            job_timeout="10m",
+            result_ttl=500,
+        )
+        print(f"[DEBUG] Trabajo encolado exitosamente: {job.id}")
+    except Exception as e:
+        print(f"[ERROR] Error al encolar trabajo: {str(e)}")
+        # No fallar la respuesta, solo loggear el error
+        pass
 
     return {"document_id": str(doc_id), "upload_url": upload_url, "object_key": object_key}
 
@@ -75,6 +89,7 @@ def get_doc_status(
         "status": doc.status,
         "pages_count": doc.pages_count,
         "text_chars": doc.text_chars,
+        "formulas_count": doc.formulas_count or 0,
     }
 
 # ------------------------------------------------------------------ #
@@ -127,4 +142,43 @@ def preview_doc(
         "returned": len(preview),
         "offset": 0 if full else offset,
         "total_chunks": total_chunks,
+    }
+
+
+@router.get("/{document_id}/formulas")
+def get_document_formulas(
+    document_id: UUID,
+    user=Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """
+    Obtiene todas las fórmulas matemáticas extraídas de un documento.
+    """
+    doc = session.exec(select(Document).where(Document.id == document_id)).first()
+    if not doc or doc.user_id != user["sub"]:
+        raise HTTPException(404, "Documento no encontrado")
+
+    if doc.status not in ("ready_for_embeddings", "ready_for_chat"):
+        raise HTTPException(409, "El documento aún no está listo")
+
+    formulas = session.exec(
+        select(DocumentFormula)
+        .where(DocumentFormula.document_id == document_id)
+        .order_by(DocumentFormula.page_number, DocumentFormula.formula_index)
+    ).all()
+
+    return {
+        "document_id": str(document_id),
+        "total_formulas": len(formulas),
+        "formulas": [
+            {
+                "id": str(f.id),
+                "page_number": f.page_number,
+                "formula_index": f.formula_index,
+                "latex_code": f.latex_code,
+                "original_text": f.original_text,
+                "confidence_score": f.confidence_score,
+            }
+            for f in formulas
+        ]
     }
