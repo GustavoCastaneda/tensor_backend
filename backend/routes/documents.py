@@ -9,7 +9,7 @@ from backend.security import get_current_user
 from backend.db import get_session
 from backend.supabase_client import get_supabase
 
-from backend.ingest_document import process_document
+from backend.document_router import route_document_processing
 from backend.models import Document, DocChunk, DocumentFormula
 
 # Cola dedicada para parseo de documentos
@@ -55,21 +55,42 @@ def upload_url(
     session.add(doc)
     session.commit()
 
-    # Log detallado del encolamiento
-    print(f"[DEBUG] Encolando trabajo para documento {doc_id}")
+    # Router inteligente para enrutar a servicio light o heavy
+    print(f"[DEBUG] Enrutando documento {doc_id} para análisis")
     try:
-        # Usar ruta completa de importación
-        job = q_doc.enqueue(
-            "backend.ingest_document.process_document",
-            str(doc_id),
-            job_timeout="10m",
-            result_ttl=500,
+        # Descargar el documento para análisis
+        key = doc.storage_url.split("/", 1)[1]
+        raw = supa.storage.from_(bucket).download(key)
+        
+        # Determinar extensión
+        ext = (filename.split(".")[-1] or "").lower()
+        
+        # Enrutar usando el router inteligente
+        queue_name, service_type, detected_patterns = route_document_processing(
+            str(doc_id), raw, ext
         )
-        print(f"[DEBUG] Trabajo encolado exitosamente: {job.id}")
+        
+        print(f"[DEBUG] Documento enrutado a {service_type} service ({queue_name})")
+        if detected_patterns:
+            print(f"[DEBUG] Patrones detectados: {detected_patterns[:3]}")
+            
     except Exception as e:
-        print(f"[ERROR] Error al encolar trabajo: {str(e)}")
-        # No fallar la respuesta, solo loggear el error
-        pass
+        print(f"[ERROR] Error al enrutar documento: {str(e)}")
+        # En caso de error, usar servicio pesado por defecto
+        try:
+            from redis import Redis
+            from rq import Queue
+            redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+            q_heavy = Queue("doc_parse_heavy", connection=redis_conn)
+            q_heavy.enqueue(
+                "backend.ingest_document_heavy.process_document_heavy",
+                str(doc_id),
+                job_timeout="15m",
+                result_ttl=500,
+            )
+            print(f"[DEBUG] Fallback a servicio pesado por error")
+        except Exception as fallback_error:
+            print(f"[ERROR] Error en fallback: {str(fallback_error)}")
 
     return {"document_id": str(doc_id), "upload_url": upload_url, "object_key": object_key}
 

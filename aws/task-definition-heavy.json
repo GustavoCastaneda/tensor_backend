@@ -1,0 +1,50 @@
+{
+  "family": "tensor-docling-heavy-worker",
+  "taskRoleArn": "arn:aws:iam::891376931243:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::891376931243:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "8192",
+  "memory": "32768",
+  "containerDefinitions": [
+    {
+      "name": "docling-heavy-worker",
+      "image": "891376931243.dkr.ecr.us-east-1.amazonaws.com/tensor-docling-worker:opencv-headless",
+      "essential": true,
+      "command": [
+        "sh",
+        "-c",
+        "cd /app && PYTHONPATH=/app:/app/backend rq worker doc_parse_heavy ingest embeddings"
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/tensor-docling-heavy-worker",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "environment": [
+        { "name": "REDIS_URL", "value": "rediss://default:AaawAAIncDFiYmI4Yjk2MDAzNDM0YzMwYTk2ZTM3MDU3MjE5MzFjN3AxNDI2NzI@hip-zebra-42672.upstash.io:6379/0" },
+        { "name": "QDRANT_URL", "value": "http://10.0.13.104:6333" },
+        { "name": "DOC_PARSER", "value": "docling" },
+        { "name": "DOCLING_FORMULA_ENRICHMENT", "value": "true" },
+        { "name": "SUPABASE_DB_URL", "value": "postgresql+psycopg://postgres.uzkvyvhucbwjwcwrmxij:6sFCmcdPk*qqVE$@aws-0-us-east-2.pooler.supabase.com:6543/postgres?prepared_statement_cache_size=0" },
+        { "name": "SUPABASE_URL", "value": "https://uzkvyvhucbwjwcwrmxij.supabase.co" },
+        { "name": "SUPABASE_SERVICE_ROLE_KEY", "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV6a3Z5dmh1Y2J3andjd3JteGlqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MzIxNzEwOCwiZXhwIjoyMDY4NzkzMTA4fQ.iq25ZZLJO_He4Em_9Sb_X-wssZoVSWrWxu58Iwt3jNg" },
+        { "name": "OPENAI_API_KEY", "value": "${OPENAI_API_KEY}" },
+        { "name": "STORAGE_BUCKET", "value": "uploadeddocs" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "cd /app && PYTHONPATH=/app python -c \"import redis,ssl; r=redis.Redis.from_url('$REDIS_URL', ssl_cert_reqs=None); r.ping()\""
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

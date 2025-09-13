@@ -14,7 +14,7 @@
       "command": [
         "sh",
         "-c",
-        "cd /app && PYTHONPATH=/app:/app/backend rq worker doc_parse ingest embeddings"
+        "cd /app && PYTHONPATH=/app:/app/backend rq worker ${DOC_PARSE_QUEUE} ingest embeddings"
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -36,6 +36,10 @@
         {
           "name": "DOC_PARSER",
           "value": "docling"
+        },
+        {
+          "name": "DOCLING_FORMULA_ENRICHMENT",
+          "value": "${DOCLING_FORMULA_ENRICHMENT}"
         },
         {
           "name": "SUPABASE_DB_URL",
