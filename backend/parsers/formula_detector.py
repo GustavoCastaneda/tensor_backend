@@ -18,9 +18,28 @@ def detect_formulas_in_pdf(buffer: bytes) -> Tuple[bool, List[str]]:
         reader = PdfReader(io.BytesIO(buffer))
         all_text = ""
         
-        # Extraer texto de las primeras 5 páginas (suficiente para detección)
-        max_pages = min(5, len(reader.pages))
-        for i in range(max_pages):
+        # Muestreo inteligente: páginas distribuidas (inicio, 25%, 50%, 75%, final)
+        total_pages = len(reader.pages)
+        if total_pages <= 5:
+            pages_to_read = list(range(total_pages))
+        else:
+            pages_to_read = [
+                0,
+                max(1, total_pages // 4),
+                max(1, total_pages // 2),
+                max(1, (3 * total_pages) // 4),
+                total_pages - 1,
+            ]
+
+        # Eliminar duplicados y mantener orden
+        seen = set()
+        ordered_pages = []
+        for p in pages_to_read:
+            if p not in seen and 0 <= p < total_pages:
+                seen.add(p)
+                ordered_pages.append(p)
+
+        for i in ordered_pages:
             try:
                 page_text = reader.pages[i].extract_text() or ""
                 all_text += page_text + " "
