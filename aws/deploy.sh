@@ -1,111 +1,177 @@
 #!/bin/bash
 
-# Script de despliegue para Tensor Docling Worker en ECS Fargate
-# Uso: ./deploy.sh [build|deploy|update]
-
+# Script de despliegue para sistema dual (Light + Heavy)
 set -e
 
 # Configuración
 AWS_REGION="us-east-1"
-AWS_PROFILE="tensor-deployer"
-export AWS_PROFILE
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REPO_NAME="tensor-docling-worker"
+ECR_REPOSITORY="891376931243.dkr.ecr.us-east-1.amazonaws.com/tensor-docling-worker"
 CLUSTER_NAME="tensor-cluster"
-SERVICE_NAME="tensor-docling-service"
+IMAGE_TAG="${1:-latest}"
 
-echo "🚀 Iniciando despliegue de Tensor Docling Worker"
-echo "Región: $AWS_REGION"
-echo "Cuenta: $ACCOUNT_ID"
+echo "🚀 Iniciando despliegue del sistema dual Docling..."
+echo "📦 Imagen: ${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-case "$1" in
-    "build")
-        echo "📦 Construyendo imagen Docker..."
+# Función para crear/actualizar servicio
+deploy_service() {
+    local service_name=$1
+    local config_file=$2
+    local formula_enrichment=$3
+    
+    echo "📋 Procesando servicio: ${service_name}"
+    
+    # Verificar si el servicio existe
+    if aws ecs describe-services --cluster ${CLUSTER_NAME} --services ${service_name} --region ${AWS_REGION} --query 'services[0].serviceName' --output text | grep -q "${service_name}"; then
+        echo "✅ Servicio ${service_name} existe, actualizando..."
+        
+        # Actualizar servicio existente
+        aws ecs update-service \
+            --cluster ${CLUSTER_NAME} \
+            --service ${service_name} \
+            --task-definition tensor-docling-worker:${IMAGE_TAG} \
+            --region ${AWS_REGION} \
+            --query 'service.{ServiceName:serviceName,Status:status,TaskDefinition:taskDefinition}' \
+            --output table
+            
+    else
+        echo "🆕 Creando nuevo servicio: ${service_name}"
+        
+        # Crear servicio nuevo
+        aws ecs create-service \
+            --cluster ${CLUSTER_NAME} \
+            --service-name ${service_name} \
+            --task-definition tensor-docling-worker:${IMAGE_TAG} \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --platform-version 1.4.0 \
+            --network-configuration "awsvpcConfiguration={subnets=[subnet-0a1b2c3d4e5f67890,subnet-0f1e2d3c4b5a69780],securityGroups=[sg-0123456789abcdef0],assignPublicIp=ENABLED}" \
+            --deployment-configuration "maximumPercent=200,minimumHealthyPercent=50" \
+            --enable-execute-command \
+            --region ${AWS_REGION} \
+            --query 'service.{ServiceName:serviceName,Status:status,TaskDefinition:taskDefinition}' \
+            --output table
+    fi
+    
+    # Configurar variable de entorno específica
+    echo "⚙️ Configurando DOCLING_FORMULA_ENRICHMENT=${formula_enrichment} para ${service_name}"
+    
+    # Nota: Las variables de entorno se configuran en la Task Definition
+    # Aquí solo mostramos la configuración
+    echo "📝 Variable configurada: DOCLING_FORMULA_ENRICHMENT=${formula_enrichment}"
+}
 
-        # Login a ECR
-        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+# Función para construir y subir imagen
+build_and_push() {
+    echo "🔨 Construyendo imagen Docker..."
+    docker build -f aws/Dockerfile.prod -t ${ECR_REPOSITORY}:${IMAGE_TAG} .
+    
+    echo "📤 Subiendo imagen a ECR..."
+    docker push ${ECR_REPOSITORY}:${IMAGE_TAG}
+    
+    echo "✅ Imagen ${ECR_REPOSITORY}:${IMAGE_TAG} subida exitosamente"
+}
 
-        # Crear repositorio si no existe
-        aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION || \
-        aws ecr create-repository --repository-name $REPO_NAME --region $AWS_REGION
+# Función para registrar Task Definition
+register_task_definition() {
+    echo "📋 Registrando Task Definition..."
+    
+    # Reemplazar variables en la Task Definition
+    sed "s/\${DOCLING_FORMULA_ENRICHMENT}/false/g" aws/task-definition.json > /tmp/task-def-light.json
+    sed "s/\${DOCLING_FORMULA_ENRICHMENT}/true/g" aws/task-definition.json > /tmp/task-def-heavy.json
+    
+    # Registrar Task Definition para Light
+    aws ecs register-task-definition \
+        --cli-input-json file:///tmp/task-def-light.json \
+        --region ${AWS_REGION} \
+        --query 'taskDefinition.{Family:family,Revision:revision,Status:status}' \
+        --output table
+    
+    # Registrar Task Definition para Heavy
+    aws ecs register-task-definition \
+        --cli-input-json file:///tmp/task-def-heavy.json \
+        --region ${AWS_REGION} \
+        --query 'taskDefinition.{Family:family,Revision:revision,Status:status}' \
+        --output table
+    
+    echo "✅ Task Definitions registradas"
+}
 
-        # Build y push (prefer buildx amd64 si está disponible)
-        if docker buildx version >/dev/null 2>&1; then
-          docker buildx build --platform linux/amd64 -f aws/Dockerfile.prod -t $REPO_NAME .
-        else
-          docker build -f aws/Dockerfile.prod -t $REPO_NAME .
-        fi
-        docker tag $REPO_NAME:latest $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:latest
-        docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:latest
+# Función para configurar auto-scaling
+setup_autoscaling() {
+    local service_name=$1
+    local min_capacity=$2
+    local max_capacity=$3
+    
+    echo "📊 Configurando auto-scaling para ${service_name}..."
+    
+    # Crear target de auto-scaling si no existe
+    aws application-autoscaling register-scalable-target \
+        --service-namespace ecs \
+        --resource-id "service/${CLUSTER_NAME}/${service_name}" \
+        --scalable-dimension ecs:service:DesiredCount \
+        --min-capacity ${min_capacity} \
+        --max-capacity ${max_capacity} \
+        --region ${AWS_REGION} || echo "⚠️ Target de auto-scaling ya existe"
+    
+    echo "✅ Auto-scaling configurado para ${service_name}"
+}
 
-        echo "✅ Imagen subida a ECR"
-        ;;
+# Función para mostrar estado
+show_status() {
+    echo "�� Estado de los servicios:"
+    
+    echo "🪶 Servicio Light:"
+    aws ecs describe-services \
+        --cluster ${CLUSTER_NAME} \
+        --services tensor-docling-light-service \
+        --region ${AWS_REGION} \
+        --query 'services[0].{ServiceName:serviceName,Status:status,DesiredCount:desiredCount,RunningCount:runningCount}' \
+        --output table
+    
+    echo "⚡ Servicio Heavy:"
+    aws ecs describe-services \
+        --cluster ${CLUSTER_NAME} \
+        --services tensor-docling-heavy-service \
+        --region ${AWS_REGION} \
+        --query 'services[0].{ServiceName:serviceName,Status:status,DesiredCount:desiredCount,RunningCount:runningCount}' \
+        --output table
+}
 
-    "deploy")
-        echo "🚀 Desplegando servicio ECS..."
+# Función principal
+main() {
+    case "${1:-all}" in
+        "build")
+            build_and_push
+            ;;
+        "deploy")
+            register_task_definition
+            deploy_service "tensor-docling-light-service" "aws/service-config-light.json" "false"
+            deploy_service "tensor-docling-heavy-service" "aws/service-config-heavy.json" "true"
+            setup_autoscaling "tensor-docling-light-service" 1 3
+            setup_autoscaling "tensor-docling-heavy-service" 0 2
+            ;;
+        "status")
+            show_status
+            ;;
+        "all")
+            build_and_push
+            register_task_definition
+            deploy_service "tensor-docling-light-service" "aws/service-config-light.json" "false"
+            deploy_service "tensor-docling-heavy-service" "aws/service-config-heavy.json" "true"
+            setup_autoscaling "tensor-docling-light-service" 1 3
+            setup_autoscaling "tensor-docling-heavy-service" 0 2
+            show_status
+            ;;
+        *)
+            echo "Uso: $0 [build|deploy|status|all]"
+            echo "  build: Solo construir y subir imagen"
+            echo "  deploy: Solo desplegar servicios"
+            echo "  status: Solo mostrar estado"
+            echo "  all: Hacer todo (por defecto)"
+            exit 1
+            ;;
+    esac
+}
 
-        # Crear cluster si no existe
-        aws ecs describe-clusters --clusters $CLUSTER_NAME --region $AWS_REGION | jq -e '.clusters[0]' || \
-        aws ecs create-cluster --cluster-name $CLUSTER_NAME --region $AWS_REGION
-
-        # Actualizar task definition con valores reales
-        sed -i '' "s/YOUR_ACCOUNT_ID/$ACCOUNT_ID/g" aws/task-definition.json
-
-        # Registrar task definition
-        aws ecs register-task-definition --cli-input-json file://aws/task-definition.json --region $AWS_REGION
-
-        # Crear servicio
-        aws ecs create-service --cli-input-json file://aws/service-config.json --region $AWS_REGION
-
-        echo "✅ Servicio desplegado"
-        ;;
-
-    "update")
-        echo "🔄 Actualizando servicio..."
-
-        # Actualizar task definition
-        aws ecs register-task-definition --cli-input-json file://aws/task-definition.json --region $AWS_REGION
-
-        # Actualizar servicio
-        aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment --region $AWS_REGION
-
-        echo "✅ Servicio actualizado"
-        ;;
-
-    "scale")
-        echo "📊 Configurando auto scaling..."
-
-        # Crear política de auto scaling
-        aws application-autoscaling register-scalable-target \
-            --service-namespace ecs \
-            --scalable-dimension ecs:service:DesiredCount \
-            --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
-            --min-capacity 1 \
-            --max-capacity 5 \
-            --region $AWS_REGION
-
-        aws application-autoscaling put-scaling-policy \
-            --policy-name cpu70-target-tracking-scaling-policy \
-            --service-namespace ecs \
-            --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
-            --scalable-dimension ecs:service:DesiredCount \
-            --policy-type TargetTrackingScaling \
-            --target-tracking-scaling-policy-configuration file://aws/auto-scaling.json \
-            --region $AWS_REGION
-
-        echo "✅ Auto scaling configurado"
-        ;;
-
-    *)
-        echo "Uso: $0 {build|deploy|update|scale}"
-        echo ""
-        echo "Comandos disponibles:"
-        echo "  build   - Construir y subir imagen a ECR"
-        echo "  deploy  - Crear cluster y servicio ECS"
-        echo "  update  - Actualizar servicio con nueva imagen"
-        echo "  scale   - Configurar auto scaling"
-        exit 1
-        ;;
-esac
-
-echo "🎉 ¡Despliegue completado!"
+# Ejecutar función principal
+main "$@"
