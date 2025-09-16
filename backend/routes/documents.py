@@ -1,7 +1,7 @@
 # backend/routes/documents.py
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from uuid import uuid4, UUID
-import os, datetime
+import os, datetime, time
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -23,11 +23,45 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 # ------------------------------------------------------------------ #
 # 1) Generar URL pre-firmada + encolar parseo
 # ------------------------------------------------------------------ #
+def _route_after_upload(doc_id: UUID, bucket: str, key: str, filename: str):
+    """Intenta descargar el archivo tras el upload y enrutar a light/heavy.
+    Reintenta por un tiempo acotado para evitar la condición de carrera.
+    """
+    try:
+        supa = get_supabase()
+        ext = (filename.split(".")[-1] or "").lower()
+
+        max_wait_seconds = int(os.getenv("ROUTER_MAX_WAIT_SECONDS", "90"))
+        interval_seconds = float(os.getenv("ROUTER_POLL_INTERVAL", "1.5"))
+
+        start = time.time()
+        last_err = None
+        while time.time() - start < max_wait_seconds:
+            try:
+                raw = supa.storage.from_(bucket).download(key)
+                # Enrutar una vez disponible
+                from backend.document_router import route_document_processing
+                queue_name, service_type, detected_patterns = route_document_processing(
+                    str(doc_id), raw, ext
+                )
+                print(f"[DEBUG] Documento {doc_id} enrutado a {service_type} ({queue_name})")
+                if detected_patterns:
+                    print(f"[DEBUG] Patrones detectados: {detected_patterns[:3]}")
+                return
+            except Exception as e:  # noqa: BLE001 - loggear y reintentar
+                last_err = e
+                time.sleep(interval_seconds)
+        print(f"[ERROR] No se pudo descargar {bucket}/{key} tras espera: {last_err}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ERROR] Router background failed: {e}")
+
+
 @router.post("/upload-url")
 def upload_url(
     filename: str = Query(..., description="Nombre del archivo (pdf o docx)"),
     user      = Depends(get_current_user),
     session:   Session = Depends(get_session),
+    background_tasks: BackgroundTasks = None,
 ):
     ext = (filename.split(".")[-1] or "").lower()
     if ext not in ("pdf", "docx"):
@@ -55,42 +89,10 @@ def upload_url(
     session.add(doc)
     session.commit()
 
-    # Router inteligente para enrutar a servicio light o heavy
-    print(f"[DEBUG] Enrutando documento {doc_id} para análisis")
-    try:
-        # Descargar el documento para análisis
+    # Enrutar en background tras la subida para evitar condición de carrera
+    if background_tasks is not None:
         key = doc.storage_url.split("/", 1)[1]
-        raw = supa.storage.from_(bucket).download(key)
-        
-        # Determinar extensión
-        ext = (filename.split(".")[-1] or "").lower()
-        
-        # Enrutar usando el router inteligente
-        queue_name, service_type, detected_patterns = route_document_processing(
-            str(doc_id), raw, ext
-        )
-        
-        print(f"[DEBUG] Documento enrutado a {service_type} service ({queue_name})")
-        if detected_patterns:
-            print(f"[DEBUG] Patrones detectados: {detected_patterns[:3]}")
-            
-    except Exception as e:
-        print(f"[ERROR] Error al enrutar documento: {str(e)}")
-        # En caso de error, usar servicio pesado por defecto
-        try:
-            from redis import Redis
-            from rq import Queue
-            redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-            q_heavy = Queue("doc_parse_heavy", connection=redis_conn)
-            q_heavy.enqueue(
-                "backend.ingest_document_heavy.process_document_heavy",
-                str(doc_id),
-                job_timeout="15m",
-                result_ttl=500,
-            )
-            print(f"[DEBUG] Fallback a servicio pesado por error")
-        except Exception as fallback_error:
-            print(f"[ERROR] Error en fallback: {str(fallback_error)}")
+        background_tasks.add_task(_route_after_upload, doc_id, bucket, key, filename)
 
     return {"document_id": str(doc_id), "upload_url": upload_url, "object_key": object_key}
 

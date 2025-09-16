@@ -29,11 +29,16 @@
         { "name": "QDRANT_URL", "value": "http://10.0.13.104:6333" },
         { "name": "DOC_PARSER", "value": "docling" },
         { "name": "DOCLING_FORMULA_ENRICHMENT", "value": "true" },
+        { "name": "DOCLING_OCR", "value": "true" },
+        { "name": "DOCLING_OCR_LANGS", "value": "eng" },
+        { "name": "DOCLING_FORCE_FULL_OCR", "value": "false" },
         { "name": "SUPABASE_DB_URL", "value": "postgresql+psycopg://postgres.uzkvyvhucbwjwcwrmxij:6sFCmcdPk*qqVE$@aws-0-us-east-2.pooler.supabase.com:6543/postgres?prepared_statement_cache_size=0" },
         { "name": "SUPABASE_URL", "value": "https://uzkvyvhucbwjwcwrmxij.supabase.co" },
         { "name": "SUPABASE_SERVICE_ROLE_KEY", "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV6a3Z5dmh1Y2J3andjd3JteGlqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MzIxNzEwOCwiZXhwIjoyMDY4NzkzMTA4fQ.iq25ZZLJO_He4Em_9Sb_X-wssZoVSWrWxu58Iwt3jNg" },
-        { "name": "OPENAI_API_KEY", "value": "${OPENAI_API_KEY}" },
         { "name": "STORAGE_BUCKET", "value": "uploadeddocs" }
+      ],
+      "secrets": [
+        { "name": "OPENAI_API_KEY", "valueFrom": "/tensor/OPENAI_API_KEY" }
       ],
       "healthCheck": {
         "command": [

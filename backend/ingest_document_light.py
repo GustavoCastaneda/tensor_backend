@@ -93,6 +93,39 @@ def process_document_light(document_id: UUID):
             else:
                 os.environ.pop("DOCLING_FORMULA_ENRICHMENT", None)
 
+        # Early-abort: detectar señales matemáticas en páginas y escalar a heavy si aplica
+        try:
+            from backend.parsers.formula_detector import count_math_signals as _count_math_signals
+        except Exception:
+            _count_math_signals = None
+
+        if _count_math_signals:
+            total_signals = 0
+            detected_examples: List[str] = []
+            # Revisa algunas páginas primero para decidir rápido
+            for page_text in pages[:min(10, len(pages))]:
+                signals, examples = _count_math_signals(page_text)
+                if signals > 0:
+                    total_signals += 1
+                    if examples:
+                        detected_examples.extend(examples[:1])
+                if total_signals >= 2:
+                    # Escalar a heavy
+                    try:
+                        from rq import Queue
+                        q_heavy = Queue("doc_parse_heavy", connection=redis_conn)
+                        q_heavy.enqueue(
+                            "backend.ingest_document_heavy.process_document_heavy",
+                            str(document_id),
+                            job_timeout="15m",
+                            result_ttl=500,
+                        )
+                        print(f"[light->heavy] Escalado por detección temprana. Señales={total_signals}. Ejemplos={detected_examples[:3]}")
+                    except Exception as e:
+                        print(f"[light->heavy] Error al encolar heavy: {e}")
+                    # No persistir nada en light; dejar que heavy procese completo
+                    return
+
         # Sanea y limita
         pages = [(p or "").strip() for p in pages if (p or "").strip()]
         if not pages:

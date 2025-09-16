@@ -3,7 +3,7 @@ import os, tempfile, io, datetime, uuid
 import polars as pl
 from uuid import UUID
 from typing import Optional, Dict, Any
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete
 
 from backend.db import engine
 from backend.supabase_client import get_supabase
@@ -19,6 +19,7 @@ q_ingest     = Queue("ingest", connection=redis_conn)  # <- NUEVA cola opcional 
 # -------------------------------------------------------------------
 
 BUCKET = os.getenv("STORAGE_BUCKET", "uploadeddocs")
+STREAMING_SIZE_MB = int(os.getenv("STREAMING_SIZE_MB", "50"))
 
 def to_jsonable(val):
     if isinstance(val, (datetime.date, datetime.datetime)):
@@ -64,16 +65,31 @@ def process_dataset(dataset_id: UUID | str):
             return
 
         buffer = io.BytesIO(raw_bytes)
+        size_mb = max(1, int(len(raw_bytes) / (1024 * 1024)))
 
         # 2️⃣ Lee con Polars (xlsx/csv/parquet)
         fname = (ds.filename or "").lower().strip()
         try:
             if fname.endswith((".xlsx", ".xls")):
-                df = pl.read_excel(buffer)
+                # Excel: lectura directa; ajustar hoja/base de inferencia
+                df = pl.read_excel(buffer, sheet_id=0, infer_schema_length=1000)
             elif fname.endswith(".csv"):
-                df = pl.read_csv(buffer)
+                if size_mb > STREAMING_SIZE_MB:
+                    # CSV grande: escanear desde archivo temporal (lazy) y colectar
+                    with tempfile.NamedTemporaryFile(suffix=".csv") as tmp:
+                        tmp.write(raw_bytes)
+                        tmp.flush()
+                        df = pl.scan_csv(tmp.name).collect()
+                else:
+                    df = pl.read_csv(buffer, low_memory=True, try_parse_dates=True)
             elif fname.endswith((".parquet", ".pq")):
-                df = pl.read_parquet(buffer)
+                if size_mb > STREAMING_SIZE_MB:
+                    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                        tmp.write(raw_bytes)
+                        tmp.flush()
+                        df = pl.scan_parquet(tmp.name).collect()
+                else:
+                    df = pl.read_parquet(buffer)
             else:
                 # intento heurístico por content sniffing mínimo
                 try:
@@ -112,11 +128,9 @@ def process_dataset(dataset_id: UUID | str):
 
         # 4️⃣ Rellena/actualiza tabla columns (limpia anteriores)
         try:
-            # Si tu modelo Column tiene constraint ON DELETE CASCADE no hace falta borrar manual.
-            # Aquí optamos por borrar para evitar duplicados si re-procesas.
-            session.exec(select(Column).where(Column.dataset_id == dataset_id))  # no borra, solo asegura import
-            # Borrado suave: elimina existentes para re-crear
-            session.exec(f"DELETE FROM column WHERE dataset_id = '{dataset_id}'")  # ajusta el nombre exacto si difiere
+            # Borrado seguro de columnas previas del dataset
+            session.exec(delete(Column).where(Column.dataset_id == dataset_id))
+            session.commit()
         except Exception:
             # Si no existe la tabla o no aplica, continuamos creando
             pass

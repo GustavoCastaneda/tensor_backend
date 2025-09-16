@@ -43,7 +43,7 @@ def route_document_processing(doc_id: str, buffer: bytes, ext: str) -> Tuple[str
             job = q_heavy.enqueue(
                 "backend.ingest_document_heavy.process_document_heavy",
                 doc_id,
-                job_timeout="15m",  # Más tiempo para procesamiento pesado
+                job_timeout="45m",  # Más tiempo para procesamiento pesado
                 result_ttl=500,
             )
             
@@ -71,7 +71,7 @@ def route_document_processing(doc_id: str, buffer: bytes, ext: str) -> Tuple[str
         job = q_heavy.enqueue(
             "backend.ingest_document_heavy.process_document_heavy",
             doc_id,
-            job_timeout="15m",
+            job_timeout="45m",
             result_ttl=500,
         )
         

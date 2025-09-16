@@ -46,11 +46,14 @@ def detect_formulas_in_pdf(buffer: bytes) -> Tuple[bool, List[str]]:
             except Exception:
                 continue
         
-        # Patrones matemáticos comunes
+        # Construir texto sanitizado para la detección (NO afecta contenido real)
+        sanitized_text = _sanitize_for_detection(all_text)
+
+        # Patrones matemáticos comunes (más específicos para evitar falsos positivos)
         math_patterns = [
             # LaTeX patterns
             r'\\[a-zA-Z]+\{[^}]*\}',  # \frac{}{}, \sqrt{}, etc.
-            r'\\[a-zA-Z]+',           # \alpha, \beta, \sum, \int, etc.
+            r'\\(alpha|beta|gamma|delta|sum|int|frac|sqrt|cdot|times|pm|leq|geq|neq|approx)\b',
             r'\$[^$]+\$',             # Math mode $...$
             r'\$\$[^$]+\$\$',         # Display math $$...$$
             
@@ -59,21 +62,22 @@ def detect_formulas_in_pdf(buffer: bytes) -> Tuple[bool, List[str]]:
             r'[αβγδεζηθικλμνξοπρστυφχψω]',  # Letras griegas
             
             # Patrones de ecuaciones
-            r'[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+',  # x = y + z
-            r'[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+',  # x = y = z
+            r'\b[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\b',  # x = y + z
+            r'\b[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\b',  # x = y = z
             
             # Fracciones visuales
-            r'[0-9]+\s*/\s*[0-9]+',  # 1/2, 3/4, etc.
+            r'\b[0-9]+\s*/\s*[0-9]+\b',  # 1/2, 3/4, etc.
             
-            # Exponentes y subíndices
-            r'[a-zA-Z0-9]+\^[a-zA-Z0-9]+',  # x^2, a^b
-            r'[a-zA-Z0-9]+_[a-zA-Z0-9]+',   # x_1, a_i
+            # Exponentes y subíndices (más estrictos)
+            r'\b[a-zA-Z]\^[0-9]+\b',      # x^2, a^3
+            r'\b[a-zA-Z]_[0-9]+\b',        # x_1, y_2
+            r'\b[a-zA-Z]_[a-zA-Z]\b',      # x_i, a_j
             
             # Funciones matemáticas
             r'\b(sin|cos|tan|log|ln|exp|sqrt|abs|max|min)\s*\(',
             
             # Notación científica
-            r'[0-9]+\.[0-9]+[eE][+-]?[0-9]+',  # 1.23e-4
+            r'\b[0-9]+\.[0-9]+[eE][+-]?[0-9]+\b',  # 1.23e-4
             
             # Matrices (patrones básicos)
             r'\[[^]]*\]\s*\[[^]]*\]',  # [a b][c d]
@@ -83,19 +87,19 @@ def detect_formulas_in_pdf(buffer: bytes) -> Tuple[bool, List[str]]:
         has_formulas = False
         
         for pattern in math_patterns:
-            matches = re.findall(pattern, all_text, re.IGNORECASE)
+            matches = re.findall(pattern, sanitized_text, re.IGNORECASE)
             if matches:
                 found_patterns.extend(matches[:3])  # Limitar a 3 ejemplos por patrón
                 has_formulas = True
         
         # Criterio adicional: densidad de símbolos matemáticos
-        math_symbols = re.findall(r'[∑∫∏∮∝∞±×÷≤≥≠≈≡αβγδεζηθικλμνξοπρστυφχψω]', all_text)
+        math_symbols = re.findall(r'[∑∫∏∮∝∞±×÷≤≥≠≈≡αβγδεζηθικλμνξοπρστυφχψω]', sanitized_text)
         if len(math_symbols) >= 3:  # Si hay 3+ símbolos matemáticos
             has_formulas = True
             found_patterns.extend(math_symbols[:3])
         
         # Criterio adicional: densidad de LaTeX
-        latex_patterns = re.findall(r'\\[a-zA-Z]+', all_text)
+        latex_patterns = re.findall(r'\\[a-zA-Z]+', sanitized_text)
         if len(latex_patterns) >= 2:  # Si hay 2+ comandos LaTeX
             has_formulas = True
             found_patterns.extend(latex_patterns[:3])
@@ -139,21 +143,23 @@ def detect_formulas_in_docx(buffer: bytes) -> Tuple[bool, List[str]]:
                 if 'm:' in xml_text or 'oMath:' in xml_text:
                     return True, ["Word equation detected"]
             
-            # Patrones matemáticos similares a PDF
+            # Patrones matemáticos similares a PDF (más específicos)
             math_patterns = [
                 r'[∑∫∏∮∝∞±×÷≤≥≠≈≡]',
                 r'[αβγδεζηθικλμνξοπρστυφχψω]',
-                r'[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+',
-                r'[0-9]+\s*/\s*[0-9]+',
-                r'[a-zA-Z0-9]+\^[a-zA-Z0-9]+',
-                r'[a-zA-Z0-9]+_[a-zA-Z0-9]+',
+                r'\b[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\b',
+                r'\b[0-9]+\s*/\s*[0-9]+\b',
+                r'\b[a-zA-Z]\^[0-9]+\b',
+                r'\b[a-zA-Z]_[0-9]+\b',
+                r'\b[a-zA-Z]_[a-zA-Z]\b',
             ]
             
             found_patterns = []
             has_formulas = False
             
+            sanitized_text = _sanitize_for_detection(all_text)
             for pattern in math_patterns:
-                matches = re.findall(pattern, all_text, re.IGNORECASE)
+                matches = re.findall(pattern, sanitized_text, re.IGNORECASE)
                 if matches:
                     found_patterns.extend(matches[:3])
                     has_formulas = True
@@ -184,3 +190,54 @@ def detect_formulas_in_document(buffer: bytes, ext: str) -> Tuple[bool, List[str
     else:
         # Para otros formatos, asumir que tiene fórmulas (usar servicio pesado)
         return True, ["Unknown format"]
+
+
+# --- Utilidades de detección compartidas ---
+
+_EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}\b")
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+_GENERIC_SNAKE_RE = re.compile(r"\b[a-z0-9]+_[a-z0-9]+\b", re.IGNORECASE)
+
+def _sanitize_for_detection(text: str) -> str:
+    """
+    Sanea texto SOLO para la heurística de detección (no afecta contenido real).
+    - Elimina emails, URLs y snake_case genérico que suele aparecer en correos/usernames.
+    """
+    if not text:
+        return ""
+    text = _EMAIL_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    # Ojo: mantenemos subíndices válidos como x_1, a_i con patrones más estrictos arriba
+    text = _GENERIC_SNAKE_RE.sub(" ", text)
+    return text
+
+def count_math_signals(text: str) -> Tuple[int, List[str]]:
+    """
+    Cuenta señales matemáticas en un bloque de texto ya extraído.
+    Devuelve (num_señales, ejemplos_encontrados).
+    """
+    if not text:
+        return 0, []
+    sanitized_text = _sanitize_for_detection(text)
+    patterns = [
+        r'\\[a-zA-Z]+\{[^}]*\}',
+        r'\\(alpha|beta|gamma|delta|sum|int|frac|sqrt|cdot|times|pm|leq|geq|neq|approx)\b',
+        r'\$[^$]+\$',
+        r'\$\$[^$]+\$\$',
+        r'[∑∫∏∮∝∞±×÷≤≥≠≈≡]',
+        r'[αβγδεζηθικλμνξοπρστυφχψω]',
+        r'\b[a-zA-Z]\s*[=]\s*[a-zA-Z0-9\+\-\*/\(\)]+\b',
+        r'\b[0-9]+\s*/\s*[0-9]+\b',
+        r'\b[a-zA-Z]\^[0-9]+\b',
+        r'\b[a-zA-Z]_[0-9]+\b',
+        r'\b[a-zA-Z]_[a-zA-Z]\b',
+        r'\b[0-9]+\.[0-9]+[eE][+-]?[0-9]+\b',
+    ]
+    found: List[str] = []
+    signals = 0
+    for pat in patterns:
+        m = re.findall(pat, sanitized_text, re.IGNORECASE)
+        if m:
+            signals += 1
+            found.extend([str(m[0])][:1])
+    return signals, found[:5]
