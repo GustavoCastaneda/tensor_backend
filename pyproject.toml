@@ -24,8 +24,13 @@ redis = "^6.2.0"
 rq = "^2.4.1"
 qdrant-client   = "^1.9"     # ← NUEVO
 openai          = "^1.14"
-pypdf = "^6.0.0"
+pypdf = "^4.0.0"
 python-docx = "^1.2.0"
+# LlamaIndex MVP dependencies
+llama-index = "^0.10.0"
+llama-index-vector-stores-qdrant = "^0.1.0"
+llama-index-embeddings-openai = "^0.1.0"
+llama-index-llms-openai = "^0.1.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.7"

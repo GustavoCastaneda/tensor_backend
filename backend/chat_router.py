@@ -42,18 +42,38 @@ def route_message(message: str) -> Intent:
         return Intent.sql
 
     # Si no aplica la regla rápida, usa el LLM para clasificar
-    resp = client.chat.completions.create(
-        model=os.environ.get("ROUTER_MODEL", "gpt-4o-mini"),  # Modelo configurable, default gpt-4o-mini
-        messages=[
-            {"role": "system", "content": SYS_PROMPT},  # Instrucciones del sistema
-            {"role": "user",   "content": message},     # Mensaje del usuario
-        ],
-        max_tokens=1,      # Solo necesitamos una palabra de respuesta
-        temperature=0,      # Respuestas determinísticas
-    )
+    model = os.environ.get("ROUTER_MODEL", "gpt-5")
+    try:
+        # Preferir Responses API con razonamiento bajo para consistencia
+        resp = client.responses.create(
+            model=model,
+            reasoning={"effort": os.getenv("REASONING_EFFORT", "low")},
+            input=[
+                {"role": "system", "content": SYS_PROMPT},
+                {"role": "user", "content": message},
+            ],
+            max_output_tokens=1,
+            text={"format": {"type": "text"}}
+        )
+        text = getattr(resp, "output_text", None)
+        if not text:
+            text = getattr(resp, "text", None)
+        if not text:
+            raise RuntimeError("no output_text from responses.create")
+    except Exception:
+        # Fallback a chat.completions
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYS_PROMPT},
+                {"role": "user",   "content": message},
+            ],
+            max_completion_tokens=1,
+        )
+        text = resp.choices[0].message.content
     
     # Extrae la respuesta del modelo y la normaliza
-    label = resp.choices[0].message.content.strip().lower()
+    label = text.strip().lower()
     
     # Convierte la respuesta a un Intent (lanza ValueError si no es válida)
     return Intent(label)

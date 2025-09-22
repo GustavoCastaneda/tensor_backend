@@ -54,3 +54,6 @@ echo ""
 echo "Ahora puedes ejecutar:"
 echo "  ./aws/deploy.sh build    # Para construir y subir imagen"
 echo "  ./aws/deploy.sh deploy   # Para desplegar el servicio"
+
+
+

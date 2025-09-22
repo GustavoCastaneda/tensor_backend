@@ -25,3 +25,6 @@ comment on column public.document_formulas.latex_code is 'Código LaTeX generado
 comment on column public.document_formulas.confidence_score is 'Puntuación de confianza del reconocimiento (0-1)';
 comment on column public.documents.formulas_count is 'Cantidad total de fórmulas matemáticas encontradas en el documento';
 
+
+
+

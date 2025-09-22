@@ -79,12 +79,13 @@ def upload_url(
         raise HTTPException(500, f"No pude generar URL firmada para {object_key}")
 
     doc = Document(
-        id          = doc_id,
-        user_id     = user["sub"],
-        filename    = filename,
-        storage_url = f"{bucket}/{object_key}",
-        status      = "processing",
-        created_at  = datetime.datetime.utcnow(),
+        id           = doc_id,
+        user_id      = user["sub"],
+        workspace_id = user["sub"],  # por ahora 1 workspace = user
+        filename     = filename,
+        storage_url  = f"{bucket}/{object_key}",
+        status       = "processing",
+        created_at   = datetime.datetime.utcnow(),
     )
     session.add(doc)
     session.commit()

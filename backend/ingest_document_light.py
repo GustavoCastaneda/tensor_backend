@@ -26,9 +26,18 @@ SAVE_MD_TO_STORAGE     = os.getenv("DOCLING_SAVE_MD", "false").lower() in ("1", 
 
 
 def _chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    """
+    Chunking v2: Crea sub-chunks por página para maximizar recall.
+    Mantiene anclaje por página (base 1) para citas en el visor.
+    """
     text = (text or "").strip()
     if not text:
         return []
+    
+    # Si el texto es muy corto, no chunkear
+    if len(text) <= max_chars:
+        return [text]
+    
     chunks, start, n = [], 0, len(text)
     while start < n:
         end = min(start + max_chars, n)
@@ -94,6 +103,7 @@ def process_document_light(document_id: UUID):
                 os.environ.pop("DOCLING_FORMULA_ENRICHMENT", None)
 
         # Early-abort: detectar señales matemáticas en páginas y escalar a heavy si aplica
+        should_escalate = False
         try:
             from backend.parsers.formula_detector import count_math_signals as _count_math_signals
         except Exception:
@@ -110,6 +120,7 @@ def process_document_light(document_id: UUID):
                     if examples:
                         detected_examples.extend(examples[:1])
                 if total_signals >= 2:
+                    should_escalate = True
                     # Escalar a heavy
                     try:
                         from rq import Queue
@@ -123,8 +134,11 @@ def process_document_light(document_id: UUID):
                         print(f"[light->heavy] Escalado por detección temprana. Señales={total_signals}. Ejemplos={detected_examples[:3]}")
                     except Exception as e:
                         print(f"[light->heavy] Error al encolar heavy: {e}")
-                    # No persistir nada en light; dejar que heavy procese completo
-                    return
+                    break  # Salir del loop si ya decidimos escalar
+
+        # Si se debe escalar, no persistir nada en light; dejar que heavy procese completo
+        if should_escalate:
+            return
 
         # Sanea y limita
         pages = [(p or "").strip() for p in pages if (p or "").strip()]
@@ -167,17 +181,18 @@ def process_document_light(document_id: UUID):
                 session.delete(oc)
             session.commit()
 
-        # 5) Troceo y persistencia (bulk)
+        # 5) Troceo y persistencia (bulk) - Chunking v2
         to_add: List[DocChunk] = []
         chunk_count = 0
         for page_idx, page_text in enumerate(pages, start=1):
             parts = _chunk_text(page_text, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP)
             for ci, ch in enumerate(parts):
                 to_add.append(DocChunk(
-                    document_id = document_id,
-                    page_number = page_idx,
-                    chunk_index = ci,
-                    content     = ch,
+                    document_id  = document_id,
+                    workspace_id = doc.workspace_id,  # Incluir workspace_id
+                    page_number  = page_idx,          # Anclaje por página (1-based)
+                    chunk_index  = ci,                # Sub-chunk dentro de la página (0-based)
+                    content      = ch,
                 ))
                 chunk_count += 1
 
@@ -195,9 +210,14 @@ def process_document_light(document_id: UUID):
         session.commit()
 
         try:
+            print(f"[light] Attempting to import generate_doc_embeddings for {document_id}")
             from backend.tasks.doc_embeddings import generate_doc_embeddings
+            print(f"[light] Successfully imported generate_doc_embeddings for {document_id}")
             q_embeddings.enqueue(generate_doc_embeddings, str(document_id))
+            print(f"[light] Successfully enqueued embeddings job for {document_id}")
         except Exception as e:
             print("[light] enqueue doc embeddings failed:", e)
+            import traceback
+            traceback.print_exc()
 
         print(f"[light] {document_id} → pages={len(pages)} chunks={chunk_count} formulas=0 (Docling without formula enrichment)")

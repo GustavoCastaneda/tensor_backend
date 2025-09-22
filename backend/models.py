@@ -83,6 +83,7 @@ class Document(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     user_id: str = Field(index=True)
+    workspace_id: str = Field(index=True)  # Workspace al que pertenece el documento
 
     filename: str
     storage_url: str
@@ -104,10 +105,26 @@ class DocChunk(SQLModel, table=True):
 
     # FK explícita a documents.id
     document_id: UUID = Field(foreign_key="documents.id", index=True)
+    workspace_id: str = Field(index=True)  # Workspace al que pertenece el chunk
 
-    page_number: int = 0           # página original (1-based)
-    chunk_index: int = 0           # índice dentro de la página (0-based)
+    page_number: int = 0           # página original (1-based) - anclaje para citas
+    chunk_index: int = 0           # índice dentro de la página (0-based) - sub-chunk
     content: str                   # texto/chunk (markdown o texto plano)
+
+
+# ─────────────── Memoria (Como-memory lite) ───────────────
+class MemoryUnit(SQLModel, table=True):
+    __tablename__ = "memory_units"
+    id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
+    workspace_id: str = Field(index=True)
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    cue: str  # frase corta (≤200 chars)
+    evidence_refs_json: str  # JSON string: [{doc_id, page, chunk_seq_range}]
+    terms_json: str  # JSON string: ["kpi", "tasa"...]
+    doc_hashes_json: Optional[str] = None  # JSON string: [hash, ...]
+    step_index: Optional[int] = 0
+    is_valid: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class DocumentFormula(SQLModel, table=True):

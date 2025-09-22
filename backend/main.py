@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes import chat
+from backend.routes import chat_semantic
 from backend.routes import users
 from backend.routes import datasets
 from backend.db import init_db            # crea tablas en dev, opcional
@@ -36,6 +37,7 @@ app.include_router(users.router)
 app.include_router(datasets.router)
 app.include_router(documents.router)
 app.include_router(chat.router)
+app.include_router(chat_semantic.router)
 
 # ──────────────── BD dev (opcional) ────────────────
 if os.getenv("ENV") == "dev" and os.getenv("INIT_DB", "false") == "true":

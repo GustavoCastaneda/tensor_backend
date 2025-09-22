@@ -26,9 +26,18 @@ SAVE_MD_TO_STORAGE     = os.getenv("DOCLING_SAVE_MD", "false").lower() in ("1", 
 
 
 def _chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    """
+    Chunking v2: Crea sub-chunks por página para maximizar recall.
+    Mantiene anclaje por página (base 1) para citas en el visor.
+    """
     text = (text or "").strip()
     if not text:
         return []
+    
+    # Si el texto es muy corto, no chunkear
+    if len(text) <= max_chars:
+        return [text]
+    
     chunks, start, n = [], 0, len(text)
     while start < n:
         end = min(start + max_chars, n)
@@ -122,17 +131,18 @@ def process_document(document_id: UUID):
                 session.delete(oc)
             session.commit()
 
-        # 5) Troceo y persistencia (bulk)
+        # 5) Troceo y persistencia (bulk) - Chunking v2
         to_add: List[DocChunk] = []
         chunk_count = 0
         for page_idx, page_text in enumerate(pages, start=1):
             parts = _chunk_text(page_text, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP)
             for ci, ch in enumerate(parts):
                 to_add.append(DocChunk(
-                    document_id = document_id,
-                    page_number = page_idx,
-                    chunk_index = ci,
-                    content     = ch,
+                    document_id  = document_id,
+                    workspace_id = doc.workspace_id,  # Incluir workspace_id
+                    page_number  = page_idx,          # Anclaje por página (1-based)
+                    chunk_index  = ci,                # Sub-chunk dentro de la página (0-based)
+                    content      = ch,
                 ))
                 chunk_count += 1
 

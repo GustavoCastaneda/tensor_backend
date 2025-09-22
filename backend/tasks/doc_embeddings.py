@@ -1,5 +1,6 @@
 # backend/tasks/doc_embeddings.py
 import os
+import hashlib
 from typing import List
 from uuid import UUID
 from sqlmodel import Session, select
@@ -23,6 +24,10 @@ def _ensure_collection(name: str, vector_size: int = 1536):
             collection_name=name,
             vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
         )
+
+def _generate_content_hash(content: str) -> str:
+    """Genera hash MD5 del contenido para deduplicar chunks"""
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 def generate_doc_embeddings(document_id: str):
     coll = str(document_id)
@@ -51,20 +56,33 @@ def generate_doc_embeddings(document_id: str):
             embs  = llm.embeddings.create(model=EMB_MODEL, input=texts).data
             vectors = [e.embedding for e in embs]
 
-            points = [
-                models.PointStruct(
-                    id=str(c.id),
-                    vector=vec,
-                    payload={
-                        "document_id": str(c.document_id),
-                        "page_number": c.page_number,
-                        "chunk_index": c.chunk_index,
-                        "text": c.content[:512],
-                        "type": "doc_chunk",
-                    },
+            points = []
+            for c, vec in zip(batch, vectors):
+                content = c.content or ""
+                lang = "en"
+                payload = {
+                    "workspace_id": c.workspace_id,
+                    "doc_id": str(c.document_id),
+                    "title": doc.filename,
+                    "page": c.page_number,
+                    "chunk_seq": c.chunk_index + 1,
+                    "block_type": "text",
+                    "text": content,
+                    "text_preview": content[:512],
+                    "section_path": None,
+                    "bbox_norm": None,
+                    "char_start": None,
+                    "char_end": None,
+                    "hash": _generate_content_hash(content),
+                    "lang": lang,
+                }
+                points.append(
+                    models.PointStruct(
+                        id=str(c.id),
+                        vector=vec,
+                        payload=payload,
+                    )
                 )
-                for c, vec in zip(batch, vectors)
-            ]
             qdrant.upsert(collection_name=coll, points=points)
 
         # Actualizar el estado del documento a ready_for_chat

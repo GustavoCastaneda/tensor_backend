@@ -1,5 +1,5 @@
 # backend_tensor/Dockerfile - Optimizado para ECS Fargate
-FROM python:3.13-slim
+FROM python:3.11-slim
 
 # -------- SO deps + Tesseract (OCR) ----------
 RUN apt-get update && \
@@ -10,12 +10,12 @@ RUN apt-get update && \
     && apt-get clean
 
 # -------- Usuario no-root para seguridad ----------
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-USER app
+RUN useradd --create-home --shell /bin/bash app
 
 # -------- Workspace ---------------------------------------------------
 WORKDIR /app
+RUN chown -R app:app /app
+USER app
 
 # 1) Copiamos manifests para cachear deps
 COPY --chown=app:app pyproject.toml poetry.lock /app/
