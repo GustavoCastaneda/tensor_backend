@@ -34,3 +34,4 @@ ALTER COLUMN workspace_id SET NOT NULL;
 
 ALTER TABLE doc_chunks 
 ALTER COLUMN workspace_id SET NOT NULL;
+

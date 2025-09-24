@@ -6,13 +6,23 @@ Implementa estrategia de retrieval adaptativa, fusión de chunks y citas clicabl
 from typing import List, Optional, Dict, Any, Tuple, Set
 import os
 import re
+import json
 import time
 import hashlib
 from uuid import UUID
 from dataclasses import dataclass
 from enum import Enum
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+# AI DataStream imports
+try:
+    from ai_datastream.api.fastapi import AiChatDataStreamAsyncResponse, FastApiDataStreamRequest
+    from ai_datastream.agent.openai import OpenAIChatStreamer
+    AI_DATASTREAM_AVAILABLE = True
+except ImportError:
+    AI_DATASTREAM_AVAILABLE = False
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -146,6 +156,7 @@ class ChatSemanticRequest(BaseModel):
     include_thinking_summary: bool = Field(default=False)  # Resumen legible del razonamiento operativo
     conversation: Optional[str] = None  # ID o historial para desambiguar
     client_version: Optional[str] = None  # Telemetría
+    stream: bool = Field(default=False)  # Habilitar streaming SSE
     
     # ───────── Search-R1-lite Parameters ─────────
     search_loop_max_steps: int = Field(default=2, ge=1, le=3)  # Máx. ciclos de búsqueda
@@ -326,6 +337,49 @@ def _extract_relevant_snippet(text: str, max_chars: int = 600) -> str:
     return _normalize_snippet(text, max_chars)
 
 
+def _extract_answer_and_reasoning(resp: Any) -> Tuple[str, str]:
+    answer = ""
+    reasoning_text = ""
+
+    if hasattr(resp, "output") and resp.output:
+        for item in resp.output:
+            item_type = getattr(item, "type", None)
+            if item_type == "reasoning":
+                summaries = getattr(item, "summary", None) or []
+                for summary_item in summaries:
+                    text_val = getattr(summary_item, "text", None)
+                    if text_val:
+                        reasoning_text = text_val
+                if not reasoning_text and getattr(item, "content", None):
+                    for content_item in item.content or []:
+                        text_val = getattr(content_item, "text", None)
+                        if text_val:
+                            reasoning_text = text_val
+            elif item_type == "message" and getattr(item, "content", None):
+                for content_item in item.content or []:
+                    text_val = getattr(content_item, "text", None)
+                    if text_val:
+                        answer = text_val
+
+    if not answer and hasattr(resp, "output_text") and resp.output_text:
+        answer = resp.output_text
+
+    if not answer and hasattr(resp, "output") and resp.output:
+        for item in resp.output:
+            for content_item in getattr(item, "content", []) or []:
+                text_val = getattr(content_item, "text", None)
+                if text_val:
+                    answer = text_val
+                    break
+            if answer:
+                break
+
+    if not answer and reasoning_text:
+        answer = reasoning_text
+
+    return answer, reasoning_text
+
+
 def _invoke_llama_index(
     req: "ChatSemanticRequest",
     docs: List[Document],
@@ -364,6 +418,86 @@ def _invoke_llama_index(
     except Exception as e:
         print(f"LlamaIndex MVP failed ({reason}): {e}")
         return None, {"error": str(e), "reason": reason}
+
+
+def _sse_event(data: Dict[str, Any], event: Optional[str] = None) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    if event:
+        return f"event: {event}\ndata: {payload}\n\n"
+    return f"data: {payload}\n\n"
+
+
+def _stream_openai_response(
+    client: "OpenAI",
+    request_kwargs: Dict[str, Any],
+    citations: List[CitationItem],
+    finalize_cb,
+    req: "ChatSemanticRequest",
+) -> StreamingResponse:
+    def event_stream():
+        info_payload = {
+            "type": "info",
+            "citations": [c.model_dump() for c in citations],
+            "stream": True,
+        }
+        yield _sse_event(info_payload)
+
+        try:
+            # Usar responses.create con stream=True en lugar de responses.stream
+            stream = client.responses.create(**request_kwargs, stream=True)
+            
+            answer_text = ""
+            reasoning_text = ""
+
+            for event in stream:
+                event_type = getattr(event, "type", "")
+
+                if event_type == "response.reasoning.delta":
+                    delta = getattr(event, "delta", None)
+                    text_val = None
+                    if isinstance(delta, str):
+                        text_val = delta
+                    elif hasattr(delta, "text"):
+                        text_val = delta.text
+                    if text_val:
+                        reasoning_text += text_val
+                        yield _sse_event({"type": "reasoning", "text": text_val})
+                        
+                elif event_type == "response.reasoning_summary_text.delta":
+                    # Manejar reasoning summary
+                    delta = getattr(event, "delta", None)
+                    text_val = None
+                    if isinstance(delta, str):
+                        text_val = delta
+                    elif hasattr(delta, "text") and delta.text:
+                        text_val = delta.text
+                    if text_val:
+                        reasoning_text += text_val
+                        yield _sse_event({"type": "reasoning", "text": text_val})
+                        
+                elif event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if isinstance(delta, str) and delta:
+                        answer_text += delta
+                        yield _sse_event({"type": "token", "text": delta})
+                    elif hasattr(delta, "text") and delta.text:
+                        answer_text += delta.text
+                        yield _sse_event({"type": "token", "text": delta.text})
+                        
+                elif event_type in ["response.completed", "response.done"]:
+                    # El stream ha terminado
+                    break
+
+            # Usar el texto acumulado para generar la respuesta final
+            response_model = finalize_cb(answer_text, reasoning_text)
+            yield _sse_event({"type": "final", "response": response_model.model_dump()})
+            yield "event: done\n\n"
+
+        except Exception as e:
+            yield _sse_event({"type": "error", "message": str(e)})
+            yield "event: done\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ───────────────────────── Search-R1-lite Engine ─────────────────────────
@@ -1455,20 +1589,140 @@ def chat_semantic(
             )
 
     # ────────── 9. Síntesis con LLM ──────────
-    # Generar respuesta sintetizada basada en la evidencia encontrada
+    def finalize_response(answer_text: str, reasoning_text: str) -> ChatSemanticResponse:
+        nonlocal memory_hits, memory_items, citations, rex_meta, llama_response, llama_metrics, llama_trigger_reason
+
+        answer_clean = answer_text or ""
+        reasoning_clean = reasoning_text or ""
+
+        if COMO_MEMORY_FLAG and citations:
+            lower_ans = answer_clean.lower()
+            if any(k in lower_ans for k in ["definición", "se define", "equivale", "= (", "= "]):
+                try:
+                    top = citations[0]
+                    cue = f"{req.message[:60]} → {answer_clean[:120]}"[:200]
+                    evidence_refs = [
+                        {
+                            "doc_id": top.doc_id,
+                            "page": top.page,
+                            "chunk_seq_range": top.chunk_seq_range,
+                        }
+                    ]
+                    terms = [t for t in req.message.lower().split() if len(t) > 2][:6]
+                    _memory_write(
+                        session,
+                        workspace_id=req.workspace_id,
+                        conversation_id=req.conversation or None,
+                        cue=cue,
+                        evidence_refs=evidence_refs,
+                        terms=terms,
+                        doc_hashes=None,
+                        step_index=0,
+                    )
+                except Exception:
+                    pass
+
+        meta = {
+            "workspace_id": req.workspace_id,
+            "intent": "semantic",
+            "used_model": {
+                "embeddings": EMB_MODEL,
+                "answer": LLM_MODEL,
+                "reasoning_effort": REASONING_EFFORT,
+            },
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "search_r1": {
+                "executed_steps": search_telemetry.executed_steps,
+                "stop_signal": search_telemetry.stop_signal,
+                "exploration_badge": search_telemetry.exploration_badge,
+                "queries_executed": len(search_telemetry.queries_per_probe) if search_telemetry.queries_per_probe else 0,
+            },
+            "hybrid_search": {
+                "enabled": req.hybrid_enabled and HYBRID_ENABLED,
+                "alpha": req.hybrid_alpha,
+                "dense_weight": req.hybrid_alpha,
+                "sparse_weight": 1.0 - req.hybrid_alpha,
+            },
+            "llama_mvp": {
+                "enabled": USE_LLAMA_MVP,
+                "used": llama_response is not None,
+                "metrics": llama_metrics if llama_response else None,
+                "trigger_reason": llama_trigger_reason or ("not_used" if USE_LLAMA_MVP else None),
+            },
+            "rex": rex_meta or {"rex_applied": False},
+            "memory": {
+                "applied": bool(memory_hits),
+                "hits": memory_hits,
+            } if COMO_MEMORY_FLAG else {"applied": False},
+            "stream": req.stream,
+        }
+
+        debug = None
+        if req.include_debug:
+            debug = {
+                "evidence_target": req.evidence_target,
+                "min_score": req.min_score,
+                "per_page_cap": req.per_page_cap,
+                "per_doc_cap": req.per_doc_cap,
+                "search_r1_full": search_telemetry.__dict__,
+                "timings_ms": {
+                    "search_total": t_search_total,
+                    "loop_breakdown": search_telemetry.latencies_ms,
+                },
+                "candidates": [
+                    {
+                        "doc_id": str((p.payload or {}).get("doc_id")),
+                        "page": int((p.payload or {}).get("page", 0)),
+                        "chunk_seq": int((p.payload or {}).get("chunk_seq", 0)),
+                        "score": float(p.score or 0.0),
+                    }
+                    for p in filtered[: min(50, len(filtered))]
+                ],
+            }
+            if reasoning_clean:
+                debug["gpt5_reasoning"] = reasoning_clean
+
+            if req.include_thinking_summary:
+                try:
+                    qlist = search_telemetry.queries_executed if getattr(search_telemetry, "queries_executed", None) else []
+                    qshow = " | ".join(qlist[:3]) + (" …" if len(qlist) > 3 else "")
+                    rex_applied = (rex_meta or {}).get("rex_applied", False)
+                    rex_brief = (
+                        f"REX:{'on' if rex_applied else 'off'}"
+                        + (
+                            f" r={ (rex_meta or {}).get('rex_rounds', 0) } trig={(rex_meta or {}).get('rex_trigger','')}"
+                            if rex_applied else ""
+                        )
+                    )
+                    mem_brief = f"Memory:{'on' if COMO_MEMORY_FLAG and memory_hits else 'off'}"
+                    sources_docs = len({c.doc_id for c in citations})
+                    debug["thinking_summary"] = (
+                        f"Steps:{search_telemetry.executed_steps}; Stop:{search_telemetry.stop_signal}; "
+                        f"Queries:{qshow}; {rex_brief}; {mem_brief}; "
+                        f"Evidence:{len(citations)} blocks from {sources_docs} docs"
+                    )
+                except Exception:
+                    pass
+
+        return ChatSemanticResponse(
+            answer=answer_clean,
+            reasoning=reasoning_clean or None,
+            citations=citations,
+            meta=meta,
+            debug=debug,
+        )
+
     answer = ""
-    reasoning_text = ""  # Variable para capturar el razonamiento de GPT-5
-    
-    # Usar LlamaIndex si está disponible y tiene buena respuesta
+    reasoning_text = ""
+
     if llama_response and llama_response.response:
         print("Using LlamaIndex response as primary answer")
         answer = llama_response.response
         reasoning_text = f"Generated by LlamaIndex MVP (latency: {llama_metrics.get('latency_ms', 0)}ms)"
-        
-        # Crear citas desde los nodos recuperados de LlamaIndex
+
         if hasattr(llama_response, 'source_nodes') and llama_response.source_nodes:
             citations = []
-            for i, node in enumerate(llama_response.source_nodes[:3]):  # Top 3 nodes
+            for node in llama_response.source_nodes[:3]:
                 metadata = node.metadata or {}
                 citations.append(
                     CitationItem(
@@ -1479,265 +1733,170 @@ def chat_semantic(
                         text_snippet=_extract_relevant_snippet(node.text, 800),
                         score=getattr(node, 'score', 0.0),
                         confidence_badge=_confidence_badge(getattr(node, 'score', 0.0)),
-                        viewer_link=_make_viewer_link(metadata.get("doc_id", ""), metadata.get("page", 0))
+                        viewer_link=_make_viewer_link(metadata.get("doc_id", ""), metadata.get("page", 0)),
                     )
                 )
-    else:
-        # Usar engine nativo como fallback
-        print("Using native engine for synthesis")
+
+        response_model = finalize_response(answer, reasoning_text)
+
+        if req.stream:
+            def single_event_stream():
+                yield _sse_event({"type": "final", "response": response_model.model_dump()})
+                yield "event: done\n\n"
+
+            return StreamingResponse(single_event_stream(), media_type="text/event-stream")
+
+        return response_model
+
+    print("Using native engine for synthesis")
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    except Exception as e:
+        print(f"Error preparendo cliente OpenAI: {e}")
+        answer = "Evidencia encontrada; no se pudo sintetizar ahora. Revisa las citas para más detalle."
+        reasoning_text = ""
+        response_model = finalize_response(answer, reasoning_text)
+        if req.stream:
+            def error_stream():
+                yield _sse_event({"type": "error", "message": str(e)})
+                yield _sse_event({"type": "final", "response": response_model.model_dump()})
+                yield "event: done\n\n"
+
+            return StreamingResponse(error_stream(), media_type="text/event-stream")
+        return response_model
+
+    context = "\n\n".join(
+        [
+            f"[{i+1}] {c.title} · p.{c.page} · c.{c.chunk_seq_range}:\n{c.text_snippet}"
+            for i, c in enumerate(citations)
+        ]
+    )
+
+    prompt = (
+        "Responde la pregunta del usuario de forma precisa, basándote en la evidencia que se te proporciona + tu base de conocimiento. "
+        "Incluye números o definiciones exactas solo si están en la evidencia. "
+        "Si falta evidencia para alguna parte, indícalo.\n\n"
+        f"Pregunta: {req.message}\n\nEvidencia:\n{context}"
+    )
+
+    print("=== DEBUG FINAL PROMPT TO MODEL ===")
+    print(f"Citations count: {len(citations)}")
+    print(f"Context length: {len(context)} characters")
+    print(f"Full prompt length: {len(prompt)} characters")
+
+    if req.stream:
+        request_kwargs = {
+            "model": LLM_MODEL,
+            "input": prompt,
+            "reasoning": {"effort": REASONING_EFFORT, "summary": "auto"},
+            "max_output_tokens": 25000,
+        }
+        return _stream_openai_response(client, request_kwargs, citations, finalize_response, req)
+
+    try:
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=prompt,
+            reasoning={"effort": REASONING_EFFORT, "summary": "auto"},
+            max_output_tokens=25000,
+        )
+        answer, reasoning_text = _extract_answer_and_reasoning(resp)
+    except Exception as e:
+        print(f"Error en responses.create con reasoning: {e}")
         try:
-            from openai import OpenAI  # import lazy para evitar fallo si no hay key
-
-            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-            context = "\n\n".join(
-                [
-                    f"[{i+1}] {c.title} · p.{c.page} · c.{c.chunk_seq_range}:\n{c.text_snippet}"
-                    for i, c in enumerate(citations)
-                ]
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=500,
             )
-
-            prompt = (
-                "Responde la pregunta del usuario de forma precisa, basándote en la evidencia que se te proporciona + tu base de conocimiento. "
-                "Incluye números o definiciones exactas solo si están en la evidencia. "
-                "Si falta evidencia para alguna parte, indícalo.\n\n"
-                f"Pregunta: {req.message}\n\nEvidencia:\n{context}"
-            )
-
-            print("=== DEBUG FINAL PROMPT TO MODEL ===")
-            print(f"Citations count: {len(citations)}")
-            print(f"Context length: {len(context)} characters")
-            print(f"Full prompt length: {len(prompt)} characters")
-            print("=" * 80)
-            print("CONTEXTO COMPLETO RECUPERADO:")
-            print("=" * 80)
-            print(context)
-            print("=" * 80)
-            print("PROMPT COMPLETO AL MODELO:")
-            print("=" * 80)
-            print(prompt)
-            print("=" * 80)
-            print("=== END DEBUG FINAL PROMPT ===")
-
-            print("=== STARTING GPT-5 CALL WITH REASONING SUMMARY ===")
-            try:
-                resp = client.responses.create(
-                    model=LLM_MODEL,
-                    input=prompt,
-                    reasoning={"effort": REASONING_EFFORT, "summary": "auto"},
-                    max_output_tokens=25000,
-                )
-
-                reasoning_text = ""
-                answer = ""
-
-                print("=== DEBUG REASONING OUTPUT ===")
-                print(f"Debug: resp type: {type(resp)}")
-                print(f"Debug: output: {getattr(resp, 'output', 'NO_OUTPUT')}")
-                print(f"Debug: output_text: {getattr(resp, 'output_text', 'NO_OUTPUT_TEXT')}")
-                print(f"Debug: output count: {len(resp.output) if hasattr(resp, 'output') and resp.output else 0}")
-                if hasattr(resp, "output") and resp.output:
-                    for i, item in enumerate(resp.output):
-                        print(f"  Item {i}: type={getattr(item, 'type', 'NO_TYPE')}, status={getattr(item, 'status', 'NO_STATUS')}")
-                        if hasattr(item, "content") and item.content:
-                            print(f"    Content items: {len(item.content)}")
-                            for j, content_item in enumerate(item.content):
-                                print(f"      Content {j}: type={getattr(content_item, 'type', 'NO_TYPE')}")
-                        if hasattr(item, "summary") and item.summary:
-                            print(f"    Summary items: {len(item.summary)}")
-                            for k, summary_item in enumerate(item.summary):
-                                print(f"      Summary {k}: type={getattr(summary_item, 'type', 'NO_TYPE')}, text_length={len(getattr(summary_item, 'text', ''))}")
-                        else:
-                            print(f"    Summary: {getattr(item, 'summary', 'NO_SUMMARY')}")
-                print("=== END DEBUG ===")
-
-                if hasattr(resp, "output") and resp.output:
-                    for item in resp.output:
-                        if getattr(item, "type", None) == "reasoning":
-                            if getattr(item, "summary", None):
-                                for summary_item in item.summary or []:
-                                    if getattr(summary_item, "text", None):
-                                        reasoning_text = summary_item.text
-                                        print(f"Debug: Extracted reasoning from summary: {reasoning_text[:200]}...")
-                            elif getattr(item, "content", None):
-                                for content_item in item.content or []:
-                                    if getattr(content_item, "text", None):
-                                        reasoning_text = content_item.text
-                                        print(f"Debug: Extracted reasoning from content: {reasoning_text[:200]}...")
-                        elif getattr(item, "type", None) == "message" and getattr(item, "content", None):
-                            for content_item in item.content or []:
-                                if getattr(content_item, "text", None):
-                                    answer = content_item.text
-                                    print(f"Debug: Extracted answer: {answer[:100]}...")
-
-                if not answer and hasattr(resp, "output_text") and resp.output_text:
-                    answer = resp.output_text
-                    print(f"Debug: Extracted answer from output_text: {answer[:100]}...")
-
-                if not answer and hasattr(resp, "output") and resp.output:
-                    for item in resp.output:
-                        for content_item in getattr(item, "content", []) or []:
-                            if getattr(content_item, "text", None):
-                                answer = content_item.text
-                                print(f"Debug: Extracted answer from content: {answer[:100]}...")
-                                break
-                        if answer:
-                            break
-
-                if not answer and reasoning_text:
-                    answer = reasoning_text
-                    print(f"Debug: Using reasoning as answer: {answer[:100]}...")
-
-                if not answer:
-                    raise RuntimeError("No se pudo extraer respuesta del output")
-
-                print("=== DEBUG FINAL EXTRACTION ===")
-                print(f"Answer extracted: {bool(answer)}")
-                print(f"Answer length: {len(answer) if answer else 0}")
-                print(f"Answer preview: {answer[:200] + '...' if answer and len(answer) > 200 else answer}")
-                print(f"Reasoning extracted: {bool(reasoning_text)}")
-                print(f"Reasoning length: {len(reasoning_text) if reasoning_text else 0}")
-                print(f"Reasoning preview: {reasoning_text[:200] + '...' if reasoning_text and len(reasoning_text) > 200 else reasoning_text}")
-                print("=== END DEBUG FINAL EXTRACTION ===")
-
-            except Exception as e:
-                print(f"Error en responses.create con reasoning: {e}")
-                try:
-                    resp = client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_completion_tokens=500,
-                    )
-                    answer = resp.choices[0].message.content.strip()
-                    reasoning_text = ""
-                except Exception as inner_e:
-                    print(f"Error general en síntesis LLM: {inner_e}")
-                    answer = (
-                        "Evidencia encontrada; no se pudo sintetizar ahora. Revisa las citas para más detalle."
-                    )
-                    reasoning_text = ""
-
-        except Exception as e:
-            print(f"Error preparando síntesis con OpenAI: {e}")
-            answer = (
-                "Evidencia encontrada; no se pudo sintetizar ahora. Revisa las citas para más detalle."
-            )
+            answer = resp.choices[0].message.content.strip()
+            reasoning_text = ""
+        except Exception as inner_e:
+            print(f"Error general en síntesis LLM: {inner_e}")
+            answer = "Evidencia encontrada; no se pudo sintetizar ahora. Revisa las citas para más detalle."
             reasoning_text = ""
 
-    # ────────── 10. Construcción de metadatos y debug ──────────
-    # 9b. Como-memory (escritura): guardar definiciones/KPIs con citas
-    if COMO_MEMORY_FLAG and citations:
-        # Heurística: si la respuesta incluye una definición o mapeo de término
-        lower_ans = (answer or "").lower()
-        if any(k in lower_ans for k in ["definición", "se define", "equivale", "= (", "= "]):
-            try:
-                # Tomar hasta 1 unidad
-                top = citations[0]
-                cue = f"{req.message[:60]} → {answer[:120]}"[:200]
-                evidence_refs = [
-                    {
-                        "doc_id": top.doc_id,
-                        "page": top.page,
-                        "chunk_seq_range": top.chunk_seq_range,
-                    }
-                ]
-                # Terms simples del mensaje
-                terms = [t for t in req.message.lower().split() if len(t) > 2][:6]
-                _memory_write(
-                    session,
-                    workspace_id=req.workspace_id,
-                    conversation_id=req.conversation or None,
-                    cue=cue,
-                    evidence_refs=evidence_refs,
-                    terms=terms,
-                    doc_hashes=None,
-                    step_index=0,
-                )
-            except Exception:
-                pass
+    response_model = finalize_response(answer, reasoning_text)
+    return response_model
 
-    meta = {
-        "workspace_id": req.workspace_id,
-        "intent": "semantic",
-        "used_model": {
-            "embeddings": EMB_MODEL,
-            "answer": LLM_MODEL,
-            "reasoning_effort": REASONING_EFFORT,
-        },
-        "latency_ms": int((time.monotonic() - t0) * 1000),
-        "search_r1": {
-            "executed_steps": search_telemetry.executed_steps,
-            "stop_signal": search_telemetry.stop_signal,
-            "exploration_badge": search_telemetry.exploration_badge,
-            "queries_executed": len(search_telemetry.queries_per_probe) if search_telemetry.queries_per_probe else 0,
-        },
-        "hybrid_search": {
-            "enabled": req.hybrid_enabled and HYBRID_ENABLED,
-            "alpha": req.hybrid_alpha,
-            "dense_weight": req.hybrid_alpha,
-            "sparse_weight": 1.0 - req.hybrid_alpha,
-        },
-        "llama_mvp": {
-            "enabled": USE_LLAMA_MVP,
-            "used": llama_response is not None,
-            "metrics": llama_metrics if llama_response else None,
-            "trigger_reason": llama_trigger_reason or ("not_used" if USE_LLAMA_MVP else None),
-        },
-        "rex": rex_meta or {"rex_applied": False},
-        "memory": {
-            "applied": bool(memory_hits),
-            "hits": memory_hits,
-        } if COMO_MEMORY_FLAG else {"applied": False}
-    }
 
-    # Información de debug si está habilitada
-    debug = None
-    if req.include_debug:
-        debug = {
-            "evidence_target": req.evidence_target,
-            "min_score": req.min_score,
-            "per_page_cap": req.per_page_cap,
-            "per_doc_cap": req.per_doc_cap,
-            "search_r1_full": search_telemetry.__dict__,
-            "timings_ms": {
-                "search_total": t_search_total,
-                "loop_breakdown": search_telemetry.latencies_ms,
-            },
-            "candidates": [
-                {
-                    "doc_id": str((p.payload or {}).get("doc_id")),
-                    "page": int((p.payload or {}).get("page", 0)),
-                    "chunk_seq": int((p.payload or {}).get("chunk_seq", 0)),
-                    "score": float(p.score or 0.0),
-                }
-                for p in filtered[: min(50, len(filtered))]  # Top 50 candidatos
-            ],
-        }
-        # Agregar razonamiento de GPT-5 si está disponible
-        if reasoning_text:
-            debug["gpt5_reasoning"] = reasoning_text
+# ───────────────────────── AI SDK Compatible Endpoint ─────────────────────────
+
+@router.post("/ai-chat")
+async def ai_chat(
+    request: Request,
+    user=Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """
+    Endpoint compatible con AI SDK frontend usando ai-datastream
+    """
+    if not AI_DATASTREAM_AVAILABLE:
+        raise HTTPException(500, "AI DataStream not available. Install ai-datastream package.")
+    
+    try:
+        body = await request.json()
+        messages = body.get("messages", [])
         
-        # Thinking summary (sanitizado) opcional
-        if req.include_thinking_summary:
-            try:
-                qlist = search_telemetry.queries_executed if getattr(search_telemetry, "queries_executed", None) else []
-                qshow = " | ".join(qlist[:3]) + (" …" if len(qlist) > 3 else "")
-                rex_applied = (rex_meta or {}).get("rex_applied", False)
-                rex_brief = (
-                    f"REX:{'on' if rex_applied else 'off'}"
-                    + (
-                        f" r={ (rex_meta or {}).get('rex_rounds', 0) } trig={(rex_meta or {}).get('rex_trigger','')}"
-                        if rex_applied else ""
-                    )
-                )
-                mem_brief = f"Memory:{'on' if COMO_MEMORY_FLAG and memory_hits else 'off'}"
-                sources_docs = len({c.doc_id for c in citations})
-                debug["thinking_summary"] = (
-                    f"Steps:{search_telemetry.executed_steps}; Stop:{search_telemetry.stop_signal}; "
-                    f"Queries:{qshow}; {rex_brief}; {mem_brief}; "
-                    f"Evidence:{len(citations)} blocks from {sources_docs} docs"
-                )
-            except Exception:
-                pass
-
-    return ChatSemanticResponse(answer=answer, reasoning=reasoning_text, citations=citations, meta=meta, debug=debug)
+        if not messages:
+            raise HTTPException(400, "Messages are required")
+        
+        # Extraer la última pregunta del usuario
+        last_message = messages[-1]
+        if last_message.get("role") != "user":
+            raise HTTPException(400, "Last message must be from user")
+        
+        question = last_message.get("content", "")
+        workspace_id = body.get("workspace_id")
+        
+        if not workspace_id:
+            raise HTTPException(400, "workspace_id is required")
+        
+        # Usar la lógica existente para obtener citas y contexto
+        # TODO: Implementar búsqueda híbrida o usar función existente
+        citations = []
+        
+        if not citations:
+            # Si no hay citas, responder directamente
+            context = "No se encontró información relevante en los documentos."
+        else:
+            context = "\n\n".join([
+                f"[{i+1}] {c.title} · p.{c.page} · c.{c.chunk_seq_range}:\n{c.text_snippet}"
+                for i, c in enumerate(citations)
+            ])
+        
+        # Crear el prompt con el contexto
+        system_prompt = (
+            "Responde la pregunta del usuario de forma precisa, basándote en la evidencia que se te proporciona + tu base de conocimiento. "
+            "Incluye números o definiciones exactas solo si están en la evidencia. "
+            "Si falta evidencia para alguna parte, indícalo.\n\n"
+            f"Evidencia:\n{context}"
+        )
+        
+        # Configurar el streamer de OpenAI
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Crear el streamer
+        streamer = OpenAIChatStreamer(
+            client=client,
+            model=os.getenv("LLM_MODEL", "gpt-4o"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
+            ],
+            temperature=0.1,
+            max_tokens=4000
+        )
+        
+        # Retornar la respuesta compatible con AI SDK
+        return AiChatDataStreamAsyncResponse(
+            streamer, 
+            system_prompt, 
+            messages
+        )
+        
+    except Exception as e:
+        print(f"Error in AI chat endpoint: {e}")
+        raise HTTPException(500, f"Internal server error: {str(e)}")

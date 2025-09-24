@@ -1,7 +1,10 @@
 # backend/routes/documents.py
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
-from uuid import uuid4, UUID
-import os, datetime, time
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from uuid import UUID, uuid4
+from typing import Optional
+import datetime
+import os
+import time
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -10,7 +13,7 @@ from backend.db import get_session
 from backend.supabase_client import get_supabase
 
 from backend.document_router import route_document_processing
-from backend.models import Document, DocChunk, DocumentFormula
+from backend.models import Document, DocChunk, DocumentFormula, Workspace
 
 # Cola dedicada para parseo de documentos
 from redis import Redis
@@ -59,8 +62,12 @@ def _route_after_upload(doc_id: UUID, bucket: str, key: str, filename: str):
 @router.post("/upload-url")
 def upload_url(
     filename: str = Query(..., description="Nombre del archivo (pdf o docx)"),
-    user      = Depends(get_current_user),
-    session:   Session = Depends(get_session),
+    workspace_id: Optional[str] = Query(
+        None,
+        description="ID del workspace destino. Si se omite se usa el workspace personal del usuario.",
+    ),
+    user=Depends(get_current_user),
+    session: Session = Depends(get_session),
     background_tasks: BackgroundTasks = None,
 ):
     ext = (filename.split(".")[-1] or "").lower()
@@ -78,10 +85,30 @@ def upload_url(
     if not upload_url:
         raise HTTPException(500, f"No pude generar URL firmada para {object_key}")
 
+    target_workspace = (workspace_id or user["sub"]).strip()
+
+    if not target_workspace:
+        raise HTTPException(400, "workspace_id inválido")
+
+    if workspace_id:
+        existing_ws = session.get(Workspace, target_workspace)
+        if existing_ws and existing_ws.owner_user_id != user["sub"]:
+            raise HTTPException(403, "No tienes permisos sobre este workspace")
+        if existing_ws is None:
+            placeholder_name = workspace_id.strip() or target_workspace
+            session.add(
+                Workspace(
+                    id=target_workspace,
+                    owner_user_id=user["sub"],
+                    name=placeholder_name,
+                )
+            )
+            session.flush()
+
     doc = Document(
         id           = doc_id,
         user_id      = user["sub"],
-        workspace_id = user["sub"],  # por ahora 1 workspace = user
+        workspace_id = target_workspace,
         filename     = filename,
         storage_url  = f"{bucket}/{object_key}",
         status       = "processing",

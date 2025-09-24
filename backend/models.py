@@ -140,3 +140,16 @@ class DocumentFormula(SQLModel, table=True):
     latex_code: str               # código LaTeX de la fórmula
     original_text: Optional[str] = None  # texto original de la fórmula
     confidence_score: Optional[float] = None  # confianza del reconocimiento (0-1)
+
+
+# ───────────────────── Workspaces ─────────────────────
+
+class Workspace(SQLModel, table=True):
+    __tablename__ = "workspaces"
+
+    id: str = Field(primary_key=True, index=True)  # workspace_id existente en documentos
+    owner_user_id: str = Field(index=True)
+    name: str = Field(index=True)
+    description: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

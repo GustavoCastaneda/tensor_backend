@@ -32,6 +32,9 @@ llama-index-vector-stores-qdrant = "^0.1.0"
 llama-index-embeddings-openai = "^0.1.0"
 llama-index-llms-openai = "^0.1.0"
 
+# AI DataStream for Vercel AI SDK compatibility
+ai-datastream = "^0.0.1"
+
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.7"
 black = "^24.4.2"

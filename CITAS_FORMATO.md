@@ -40,3 +40,4 @@ Con el nuevo payload de Qdrant, las citas se construyen así:
 4. **Contexto jerárquico**: `section_path` para navegación
 5. **Multilenguaje**: `lang` para procesamiento específico
 6. **Tipos de contenido**: `block_type` para diferentes tipos de elementos
+

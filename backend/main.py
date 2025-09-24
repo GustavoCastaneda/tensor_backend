@@ -4,8 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes import chat
 from backend.routes import chat_semantic
-from backend.routes import users
 from backend.routes import datasets
+from backend.routes import users
+from backend.routes import workspaces
 from backend.db import init_db            # crea tablas en dev, opcional
 from backend.routes import documents
 
@@ -36,6 +37,7 @@ app.add_middleware(
 app.include_router(users.router)
 app.include_router(datasets.router)
 app.include_router(documents.router)
+app.include_router(workspaces.router)
 app.include_router(chat.router)
 app.include_router(chat_semantic.router)
 
