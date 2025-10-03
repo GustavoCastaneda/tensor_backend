@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes import chat
 from backend.routes import chat_semantic
+from backend.routes import chat_unified
+from backend.routes import chat_sql
 from backend.routes import datasets
 from backend.routes import users
 from backend.routes import workspaces
@@ -40,6 +42,8 @@ app.include_router(documents.router)
 app.include_router(workspaces.router)
 app.include_router(chat.router)
 app.include_router(chat_semantic.router)
+app.include_router(chat_unified.router)  # Router unificado
+app.include_router(chat_sql.router)      # Sistema SQL independiente
 
 # ──────────────── BD dev (opcional) ────────────────
 if os.getenv("ENV") == "dev" and os.getenv("INIT_DB", "false") == "true":

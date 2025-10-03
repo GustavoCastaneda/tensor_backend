@@ -49,6 +49,7 @@ class Dataset(SQLModel, table=True):
 
     id: UUID | None = Field(default=None, primary_key=True)
     user_id: str
+    workspace_id: str = Field(index=True)  # Workspace al que pertenece el dataset
     filename: str | None = None
     storage_url: str | None = None
     parquet_url: str | None = None

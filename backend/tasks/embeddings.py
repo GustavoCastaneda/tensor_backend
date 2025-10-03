@@ -2,6 +2,10 @@
 import os
 from typing import List, Dict, Optional
 from uuid import UUID
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 from sqlmodel import Session, select
 from qdrant_client import QdrantClient, models
@@ -25,6 +29,10 @@ def _get_openai() -> Optional["OpenAI"]:  # type: ignore
 
 def _get_qdrant() -> QdrantClient:
     return QdrantClient(url=os.getenv("QDRANT_URL", "http://qdrant:6333"))
+
+# Conexión directa al importar (igual que doc_embeddings.py)
+# Esto asegura que la conexión se establezca cuando el worker importa el módulo
+qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://qdrant:6333"))
 
 
 def _build_col_text(col: Column) -> str:
@@ -76,7 +84,8 @@ def generate_embeddings(dataset_id: str) -> Dict[str, any]:
     client = _get_openai()
     qc = None
     try:
-        qc = _get_qdrant()
+        # Usar la conexión global en lugar de crear una nueva
+        qc = qdrant
     except Exception:
         qc = None
 

@@ -91,11 +91,15 @@ def _sql_flow(
     user,
     relevant_col_names: Optional[List[str]] = None,
 ) -> tuple[str, str, TableData]:
-    ds, columns_hint, _ = _load_ds_and_columns(session, dataset_id, user)
+    ds, columns_hint, cols = _load_ds_and_columns(session, dataset_id, user)
     sql, explanation = generate_sql(
         question, columns_hint, relevant_cols=relevant_col_names
     )
-    out = run_sql_on_dataset(ds.parquet_url, sql, limit=300)
+    
+    # Extraer nombres de columnas para validación
+    available_columns = [col.original_name for col in cols if col.original_name]
+    
+    out = run_sql_on_dataset(ds.parquet_url, sql, limit=300, available_columns=available_columns)
     # Evitamos pasar claves extra a TableData
     table = TableData(columns=out.get("columns", []), rows=out.get("rows", []))
     return sql, explanation, table

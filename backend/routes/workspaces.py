@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlmodel import Session, select
 
 from backend.db import get_session
-from backend.models import Document, Workspace
+from backend.models import Document, Workspace, Dataset
 from backend.security import get_current_user
 
 
@@ -28,25 +28,61 @@ def _user_can_access(session: Session, user_id: str, workspace_id: str) -> bool:
 
 
 def _summary_for_workspace(session: Session, user_id: str, workspace_id: str) -> Dict[str, Optional[object]]:
-    """Pequeño resumen basado en los documentos del usuario en el workspace."""
+    """Pequeño resumen basado en los documentos y datasets del usuario en el workspace."""
+    # Obtener documentos PDF/DOCX
     docs: List[Document] = session.exec(
         select(Document)
         .where(Document.user_id == user_id, Document.workspace_id == workspace_id)  # type: ignore
+    ).all()
+
+    # Obtener datasets Excel/CSV
+    datasets: List[Dataset] = session.exec(
+        select(Dataset)
+        .where(Dataset.user_id == user_id, Dataset.workspace_id == workspace_id)
     ).all()
 
     counts: Dict[str, int] = {}
     pages_total = 0
     last_document_at: Optional[datetime] = None
 
+    # Procesar documentos PDF/DOCX
     for doc in docs:
         counts[doc.status] = counts.get(doc.status, 0) + 1
         if doc.pages_count:
             pages_total += doc.pages_count
-        if doc.created_at and (last_document_at is None or doc.created_at > last_document_at):
-            last_document_at = doc.created_at
+        if doc.created_at:
+            if last_document_at is None:
+                last_document_at = doc.created_at
+            else:
+                # Comparar fechas de forma segura
+                try:
+                    if doc.created_at > last_document_at:
+                        last_document_at = doc.created_at
+                except TypeError:
+                    # Si hay problema de timezone, usar la más reciente
+                    last_document_at = doc.created_at
+
+    # Procesar datasets Excel/CSV
+    for dataset in datasets:
+        counts[dataset.status] = counts.get(dataset.status, 0) + 1
+        if dataset.created_at:
+            if last_document_at is None:
+                last_document_at = dataset.created_at
+            else:
+                # Comparar fechas de forma segura
+                try:
+                    if dataset.created_at > last_document_at:
+                        last_document_at = dataset.created_at
+                except TypeError:
+                    # Si hay problema de timezone, usar la más reciente
+                    last_document_at = dataset.created_at
+
+    total_documents = len(docs) + len(datasets)
 
     return {
-        "documents_count": len(docs),
+        "documents_count": total_documents,  # Incluye PDFs + datasets
+        "pdf_documents_count": len(docs),    # Solo PDFs
+        "datasets_count": len(datasets),     # Solo datasets
         "counts_by_status": counts,
         "pages_total": pages_total,
         "last_document_at": last_document_at.isoformat() if last_document_at else None,
@@ -61,12 +97,24 @@ def my_workspaces(
     """Lista workspaces del usuario con nombre, descripción y resumen."""
     workspace_ids: set[str] = set()
 
+    # Obtener workspace_ids de documentos PDF/DOCX
     doc_rows = session.exec(
         select(Document.workspace_id)
         .where(Document.user_id == user["sub"])  # type: ignore
         .distinct()
     ).all()
     for row in doc_rows:
+        ws_id = row[0] if isinstance(row, tuple) else row
+        if ws_id:
+            workspace_ids.add(ws_id)
+
+    # Obtener workspace_ids de datasets Excel/CSV
+    dataset_rows = session.exec(
+        select(Dataset.workspace_id)
+        .where(Dataset.user_id == user["sub"])
+        .distinct()
+    ).all()
+    for row in dataset_rows:
         ws_id = row[0] if isinstance(row, tuple) else row
         if ws_id:
             workspace_ids.add(ws_id)

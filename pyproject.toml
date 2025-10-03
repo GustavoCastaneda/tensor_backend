@@ -20,6 +20,7 @@ polars = "^1.31.0"
 pyarrow = "^21.0.0"
 duckdb = "^1.3.2"
 fastexcel = ">=0.7.0"
+openpyxl = "^3.1.0"
 redis = "^6.2.0"
 rq = "^2.4.1"
 qdrant-client   = "^1.9"     # ← NUEVO
@@ -32,8 +33,8 @@ llama-index-vector-stores-qdrant = "^0.1.0"
 llama-index-embeddings-openai = "^0.1.0"
 llama-index-llms-openai = "^0.1.0"
 
-# AI DataStream for Vercel AI SDK compatibility
-ai-datastream = "^0.0.1"
+# AI DataStream for Vercel AI SDK compatibility (temporalmente deshabilitado)
+# ai-datastream = "^0.0.1"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.7"
